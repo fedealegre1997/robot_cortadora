@@ -1,0 +1,32 @@
+# ROS 2
+ros2_ws/build/
+ros2_ws/install/
+ros2_ws/log/
+
+# ESP-IDF / firmware
+**/build/
+**/.idf/
+**/sdkconfig
+**/sdkconfig.old
+**/dependencies.lock
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+env/
+
+# Logs / temporales
+*.log
+*.tmp
+
+# OS / editor
+*.swp
+*~
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

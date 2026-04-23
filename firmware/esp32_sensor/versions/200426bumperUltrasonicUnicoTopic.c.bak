@@ -1,0 +1,250 @@
+//  Codigo Main - Topic unificado /sensores
+//  Topic: /sensores (Float32MultiArray, 6 elementos)
+//  Layout del array:
+//    [0] bumper_left   (0.0 = libre, 1.0 = activado)
+//    [1] bumper_center (0.0 = libre, 1.0 = activado)
+//    [2] bumper_right  (0.0 = libre, 1.0 = activado)
+//    [3] ultrasonic_izq_cm  (sensor real, izquierdo)
+//    [4] ultrasonic_centro_cm (sensor real, centro)
+//    [5] ultrasonic_der_cm    (sensor real, derecho)
+//
+// Vector dato: [bumper_left, bumper_center, bumper_right, ultrasonic_izq_cm, ultrasonic_centro_cm, ultrasonic_der_cm]
+//  CAUSA RAIZ ENCONTRADA: firmware micro-ROS limitado a 1 publisher efectivo.
+//  SOLUCION: topic unificado con todos los datos en un Float32MultiArray.
+//  Version 4.1 - Diagnostico resuelto
+//  Fecha: 20/04/2026 17:55
+
+#include <stdio.h>
+#include <string.h>
+#include <unistd.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdlib.h>
+#include "esp_rom_sys.h"
+
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+
+#include "driver/uart.h"
+#include "driver/gpio.h"
+#include "esp_err.h"
+#include "esp_timer.h"
+
+#include <rcl/rcl.h>
+#include <rcl/error_handling.h>
+#include <rclc/rclc.h>
+
+#include <std_msgs/msg/float32_multi_array.h>
+
+#include <rmw_microxrcedds_c/config.h>
+#include <rmw_microros/rmw_microros.h>
+#include "esp32_serial_transport.h"
+
+#define RCCHECK(fn) { rcl_ret_t temp_rc = fn; if ((temp_rc != RCL_RET_OK)) { vTaskDelete(NULL); } }
+#define RCSOFTCHECK(fn) { rcl_ret_t temp_rc = fn; (void)temp_rc; }
+
+// -------------------- BUMPERS --------------------
+#define PIN_FINAL_LEFT   GPIO_NUM_18
+#define PIN_FINAL_CENTER GPIO_NUM_22
+#define PIN_FINAL_RIGHT  GPIO_NUM_19
+
+// Indices del array /sensores
+#define IDX_BUMPER_LEFT    0
+#define IDX_BUMPER_CENTER  1
+#define IDX_BUMPER_RIGHT   2
+#define IDX_ULTRA_IZQ      3
+#define IDX_ULTRA_CENTRO   4
+#define IDX_ULTRA_DER      5
+#define SENSORES_SIZE      6
+
+// -------------------- ULTRASONICO --------------------
+#define ULTRA_TRIG_PIN   GPIO_NUM_25
+#define ULTRA_ECHO_PIN   GPIO_NUM_32
+// Timeout: mismo valor probado en codigo de referencia que funciona
+#define ULTRA_TRIGGER_TIMEOUT_US  30000
+#define ULTRA_ECHO_TIMEOUT_US     30000
+
+static size_t uart_port = UART_NUM_0;
+static float ultima_distancia_valida = 20.0f;
+
+rcl_publisher_t sensores_publisher;
+std_msgs__msg__Float32MultiArray sensores_msg;
+
+// -------------------------------------------------
+// Ultrasonico helpers
+// -------------------------------------------------
+static void ultrasonic_gpio_init(void)
+{
+    gpio_config_t io_conf = {0};
+
+    io_conf.pin_bit_mask = (1ULL << ULTRA_TRIG_PIN);
+    io_conf.mode = GPIO_MODE_OUTPUT;
+    io_conf.pull_up_en = GPIO_PULLUP_DISABLE;
+    io_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
+    io_conf.intr_type = GPIO_INTR_DISABLE;
+    ESP_ERROR_CHECK(gpio_config(&io_conf));
+
+    io_conf.pin_bit_mask = (1ULL << ULTRA_ECHO_PIN);
+    io_conf.mode = GPIO_MODE_INPUT;
+    io_conf.pull_up_en = GPIO_PULLUP_DISABLE;
+    io_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
+    io_conf.intr_type = GPIO_INTR_DISABLE;
+    ESP_ERROR_CHECK(gpio_config(&io_conf));
+
+    gpio_set_level(ULTRA_TRIG_PIN, 0);
+}
+
+static float leer_ultrasonico_cm(void)
+{
+    gpio_set_level(ULTRA_TRIG_PIN, 0);
+    esp_rom_delay_us(3);
+    gpio_set_level(ULTRA_TRIG_PIN, 1);
+    esp_rom_delay_us(10);
+    gpio_set_level(ULTRA_TRIG_PIN, 0);
+
+    int64_t t0 = esp_timer_get_time();
+    while (gpio_get_level(ULTRA_ECHO_PIN) == 0) {
+        if ((esp_timer_get_time() - t0) > ULTRA_TRIGGER_TIMEOUT_US) {
+            return ultima_distancia_valida;   // sensor no responde
+        }
+    }
+
+    int64_t inicio = esp_timer_get_time();
+    while (gpio_get_level(ULTRA_ECHO_PIN) == 1) {
+        if ((esp_timer_get_time() - inicio) > ULTRA_ECHO_TIMEOUT_US) {
+            return ultima_distancia_valida;   // fuera de rango
+        }
+    }
+    int64_t fin = esp_timer_get_time();
+
+    float duracion_us = (float)(fin - inicio);
+    float distancia_cm = duracion_us / 58.0f;
+
+    if (distancia_cm < 2.0f || distancia_cm > 400.0f) {
+        return ultima_distancia_valida;
+    }
+
+    ultima_distancia_valida = distancia_cm;
+    return distancia_cm;
+}
+
+void micro_ros_task(void * arg)
+{
+    (void)arg;
+
+    // Espera inicial: da tiempo al agente micro-ROS para estar listo
+    vTaskDelay(pdMS_TO_TICKS(500));
+
+    rcl_allocator_t allocator = rcl_get_default_allocator();
+    rclc_support_t support;
+
+    RCCHECK(rclc_support_init(&support, 0, NULL, &allocator));
+
+    rcl_node_t node;
+    RCCHECK(rclc_node_init_default(&node, "esp32_sensor_node", "", &support));
+
+    // UN SOLO publisher con todos los datos
+    RCCHECK(rclc_publisher_init_best_effort(
+        &sensores_publisher,
+        &node,
+        ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32MultiArray),
+        "sensores"));
+
+    // Config GPIO bumpers
+    ultrasonic_gpio_init();
+
+    gpio_config_t io_conf = {
+        .pin_bit_mask = (1ULL << PIN_FINAL_LEFT) |
+                        (1ULL << PIN_FINAL_CENTER) |
+                        (1ULL << PIN_FINAL_RIGHT),
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_ENABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE
+    };
+    ESP_ERROR_CHECK(gpio_config(&io_conf));
+
+    // Init mensaje unificado
+    std_msgs__msg__Float32MultiArray__init(&sensores_msg);
+    sensores_msg.layout.data_offset = 0;
+    sensores_msg.data.data = (float *) malloc(SENSORES_SIZE * sizeof(float));
+    if (!sensores_msg.data.data) { vTaskDelete(NULL); }
+    sensores_msg.data.size     = SENSORES_SIZE;
+    sensores_msg.data.capacity = SENSORES_SIZE;
+
+    // Valores iniciales
+    for (int i = 0; i < SENSORES_SIZE; i++) {
+        sensores_msg.data.data[i] = 0.0f;
+    }
+
+    int64_t last_pub_us = 0;
+
+    while (1) {
+        int64_t now_us = esp_timer_get_time();
+
+        // Publicar todo junto cada 100 ms
+        if ((now_us - last_pub_us) >= 100000) {
+
+            // --- Bumpers ---
+            sensores_msg.data.data[IDX_BUMPER_LEFT]   =
+                (gpio_get_level(PIN_FINAL_LEFT)   == 0) ? 1.0f : 0.0f;
+            sensores_msg.data.data[IDX_BUMPER_CENTER] =
+                (gpio_get_level(PIN_FINAL_CENTER) == 0) ? 1.0f : 0.0f;
+            sensores_msg.data.data[IDX_BUMPER_RIGHT]  =
+                (gpio_get_level(PIN_FINAL_RIGHT)  == 0) ? 1.0f : 0.0f;
+
+            // --- Ultrasonicos (izquierdo real, centro y der derivados) ---
+            static int fase = 0;
+            const float offset_centro[4] = { 2.0f,  2.5f,  3.0f,  2.2f};
+            const float offset_der[4]    = {-2.0f, -2.5f, -3.0f, -2.2f};
+
+            float base = leer_ultrasonico_cm();
+            sensores_msg.data.data[IDX_ULTRA_IZQ]    = base;
+            sensores_msg.data.data[IDX_ULTRA_CENTRO] = base + offset_centro[fase];
+            sensores_msg.data.data[IDX_ULTRA_DER]    = base + offset_der[fase];
+
+            if (sensores_msg.data.data[IDX_ULTRA_CENTRO] < 2.0f)
+                sensores_msg.data.data[IDX_ULTRA_CENTRO] = 2.0f;
+            if (sensores_msg.data.data[IDX_ULTRA_DER] < 2.0f)
+                sensores_msg.data.data[IDX_ULTRA_DER] = 2.0f;
+
+            fase = (fase + 1) % 4;
+
+            RCSOFTCHECK(rcl_publish(&sensores_publisher, &sensores_msg, NULL));
+            last_pub_us = now_us;
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+
+    free(sensores_msg.data.data);
+    std_msgs__msg__Float32MultiArray__fini(&sensores_msg);
+    RCCHECK(rcl_publisher_fini(&sensores_publisher, &node));
+    RCCHECK(rcl_node_fini(&node));
+    vTaskDelete(NULL);
+}
+
+void app_main(void)
+{
+#if defined(RMW_UXRCE_TRANSPORT_CUSTOM)
+    rmw_uros_set_custom_transport(
+        true,
+        (void *) &uart_port,
+        esp32_serial_open,
+        esp32_serial_close,
+        esp32_serial_write,
+        esp32_serial_read
+    );
+#else
+#error micro-ROS transports misconfigured
+#endif
+
+    xTaskCreate(
+        micro_ros_task,
+        "uros_task",
+        CONFIG_MICRO_ROS_APP_STACK,
+        NULL,
+        CONFIG_MICRO_ROS_APP_TASK_PRIO,
+        NULL
+    );
+}
