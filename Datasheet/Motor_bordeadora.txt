@@ -1,0 +1,55 @@
+REFERENCIA TÉCNICA DEL MOTOR HANPOSE 775-288W
+
+El motor utilizado corresponde a un motor DC con escobillas tipo 775, modelo HANPOSE 775-288W. Es un motor de alta velocidad y alto torque, utilizado comúnmente en aplicaciones como herramientas rotativas, cortadoras, pequeños sistemas CNC, ventiladores, mecanismos con reducción y proyectos robóticos que requieren potencia mecánica elevada.
+
+Datos principales del motor:
+
+- Modelo: HANPOSE 775-288W
+- Tipo: Motor DC con escobillas
+- Voltaje de trabajo: 12 V / 24 V, según la variante utilizada
+- Velocidad aproximada:
+  - 6000 rpm a 12 V
+  - 12000 rpm a 24 V
+- Potencia anunciada: 288 W
+- Corriente máxima anunciada: aproximadamente 12 A
+- Eje: 5 mm
+- Agujeros de montaje: M4, 2 agujeros
+- Rodamientos: doble rodamiento de bolas
+- Refrigeración: ventilador interno
+- Peso aproximado: 380 g
+- Largo del cuerpo del motor: aproximadamente 66,5 mm
+
+Observaciones técnicas:
+
+El dato de torque suele aparecer en algunas fichas comerciales como “3,8 kg”. Sin embargo, normalmente en este tipo de motores chinos se interpreta como 3,8 kg·cm, no como kg directamente. Si se toma como 3,8 kg·cm, el torque equivalente aproximado sería:
+
+3,8 kg·cm ≈ 0,37 N·m
+
+También se puede estimar el torque a partir de la potencia y velocidad. Si el motor realmente entrega 288 W mecánicos a 12000 rpm, el torque aproximado sería:
+
+T = P / ω
+
+T = 288 / [2π(12000/60)]
+
+T ≈ 0,23 N·m
+
+Por lo tanto, como referencia práctica, se puede considerar que este motor trabaja en un rango aproximado de torque entre 0,2 N·m y 0,4 N·m, dependiendo de la carga, tensión aplicada, corriente disponible y condiciones reales de operación.
+
+Referencia resumida para informe:
+
+Motor DC con escobillas tipo 775, modelo HANPOSE 775-288W, tensión nominal de 12/24 V, velocidad máxima aproximada de 12000 rpm a 24 V, potencia anunciada de 288 W, corriente máxima aproximada de 12 A, eje de 5 mm, doble rodamiento de bolas y ventilación interna.
+
+Recomendaciones de uso:
+
+- Para alcanzar la velocidad máxima de aproximadamente 12000 rpm, se debe alimentar con 24 V.
+- No conviene arrancar el motor directamente al 100% de PWM, ya que la corriente de arranque puede ser muy alta.
+- Se recomienda utilizar arranque progresivo mediante PWM.
+- El driver debe soportar más de 12 A, especialmente por los picos de corriente durante el arranque o cuando el motor se traba.
+- Es recomendable usar fusible, protección contra sobrecorriente o limitación de corriente.
+- Es un motor adecuado para aplicaciones de alta velocidad como cuchillas, turbinas o herramientas rotativas.
+- No es ideal para mover ruedas directamente, porque tiene muchas rpm y poco torque a baja velocidad. Para tracción se recomienda utilizar una caja reductora.
+- En aplicaciones como robot cortacésped, puede utilizarse como motor de cuchilla, pero se debe verificar bien el consumo, la protección eléctrica y la fijación mecánica.
+
+Conclusión:
+
+El HANPOSE 775-288W puede tomarse como un motor DC tipo 775 de alta velocidad, alimentado a 12 V o 24 V, con potencia anunciada de 288 W y corriente máxima aproximada de 12 A. Para diseño eléctrico y mecánico se recomienda sobredimensionar el driver y la fuente, debido a que la corriente de arranque puede ser bastante mayor que la corriente nominal o la indicada comercialmente.
