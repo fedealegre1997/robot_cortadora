@@ -1,26 +1,17 @@
 //  Codigo Main Motores con subscriber y publisher micro-ROS
-//  Driver actual: MC33926
+//  Driver actual: PWM + DIR (Generico)
 //  Mantiene el protocolo:
 //      motion_cmd    = [cmd_id, L_dir, L_pwm, R_dir, R_pwm, T_ms]
 //      motion_status = [cmd_id, state, L_dir, L_pwm, R_dir, R_pwm, remaining_ms]
 //
 //  Descripcion:
 //      Este firmware recibe comandos de movimiento desde el nodo central,
-//      los traduce a la logica real del driver MC33926 y publica el estado
-//      de ejecucion del comando actual.
+//      los traduce a la logica real del driver de 1 PWM + 1 DIR por motor
+//      y publica el estado de ejecucion del comando actual.
 //
-//      Logica del MC33926 usada:
-//          - Motor izquierdo:
-//              forward -> IN1 = PWM, IN2 = 0
-//              reverse -> IN1 = 0,   IN2 = PWM
-//
-//          - Motor derecho:
-//              forward -> IN1 = 0,   IN2 = PWM
-//              reverse -> IN1 = PWM, IN2 = 0
-//
-//  Version: 2.0
-//  Fecha: 23/04/2026
+//  Version: 2.1
 //  Autor: Angel Alegre
+//  Ultima verificacion: 17/05/2026 22:17
 
 #include <stdio.h>
 #include <string.h>
@@ -32,7 +23,9 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
+#include "driver/gpio.h"
 #include "driver/ledc.h"
+#include "driver/uart.h"
 #include "esp_err.h"
 #include "esp_timer.h"
 #include "esp_log.h"
@@ -48,20 +41,19 @@
 #include <rmw_microros/rmw_microros.h>
 #include "esp32_serial_transport.h"
 
-#define RCCHECK(fn)  { rcl_ret_t temp_rc = fn; if ((temp_rc != RCL_RET_OK)) { ESP_LOGE("ROS", "Error en %s: %d", #fn, (int)temp_rc); vTaskDelete(NULL); } }
+#define RCCHECK(fn)  { rcl_ret_t temp_rc = fn; if ((temp_rc != RCL_RET_OK)) { vTaskDelete(NULL); } }
 #define RCSOFTCHECK(fn) { rcl_ret_t temp_rc = fn; (void)temp_rc; }
 
 // =====================================================
-// DRIVER MC33926 / PINES
-// M1_IN1 = M1_Pwm1
-// M1_IN2 = M1_Pwm2
-// M2_IN1 = M2_Pwm1
-// M2_IN2 = M2_Pwm2
+// DRIVER / MOTORES (PWM + DIR)
 // =====================================================
-#define M1_IN1_PIN   GPIO_NUM_25
-#define M1_IN2_PIN   GPIO_NUM_26
-#define M2_IN1_PIN   GPIO_NUM_27
-#define M2_IN2_PIN   GPIO_NUM_14
+// Izquierda
+#define PWM1_PIN   GPIO_NUM_25
+#define DIR1_PIN   GPIO_NUM_26
+
+// Derecha
+#define PWM2_PIN   GPIO_NUM_27
+#define DIR2_PIN   GPIO_NUM_14
 
 // =====================================================
 // PWM
@@ -73,10 +65,8 @@
 #define PWM_MODE          LEDC_LOW_SPEED_MODE
 #define PWM_RESOLUTION    LEDC_TIMER_8_BIT
 
-#define CH_M1_IN1         LEDC_CHANNEL_0
-#define CH_M1_IN2         LEDC_CHANNEL_1
-#define CH_M2_IN1         LEDC_CHANNEL_2
-#define CH_M2_IN2         LEDC_CHANNEL_3
+#define PWM_CH_LEFT       LEDC_CHANNEL_0
+#define PWM_CH_RIGHT      LEDC_CHANNEL_1
 
 // =====================================================
 // TOPICOS
@@ -86,11 +76,24 @@ static const char * TOPIC_MOTION_STATUS = "motion_status";
 
 // =====================================================
 // PROTOCOLO
-// motion_cmd    = [cmd_id, L_dir, L_pwm, R_dir, R_pwm, T_ms]
+// motion_cmd    = [cmd_id, L_dir, L_pwm, R_dir, R_pwm, T_ms, bordeadora_on]
 // motion_status = [cmd_id, state, L_dir, L_pwm, R_dir, R_pwm, remaining_ms]
 // =====================================================
-#define CMD_LEN     6
+#define CMD_LEN     7
 #define STATUS_LEN  7
+
+// =====================================================
+// DRIVER SABERTOOTH (Bordeadora)
+// =====================================================
+#define SABERTOOTH_UART_NUM   UART_NUM_2
+#define SABERTOOTH_TX_PIN     GPIO_NUM_17
+#define SABERTOOTH_BAUD_RATE  9600
+
+#define TRIMMER_SPEED_STOP    64
+#define TRIMMER_SPEED_MIN_START 74 // Salto de potencia inicial (aprox 15%) para vencer inercia
+#define TRIMMER_SPEED_MAX     85  // Velocidad de prueba súper segura (~33% potencia)
+#define TRIMMER_RAMP_STEP     2
+#define TRIMMER_RAMP_MS       30
 
 // Convencion logica mantenida para compatibilidad con el nodo central
 #define DIR_REVERSE 0
@@ -112,10 +115,15 @@ typedef struct {
     int32_t r_dir;
     int32_t r_pwm;
     int32_t duration_ms;   // 0 = continuo
+    int32_t bordeadora_on; // 0 = off, 1 = on
     int64_t start_ms;
     bool active;
     bool continuous;
 } motion_cmd_t;
+
+static int32_t current_trimmer_speed = TRIMMER_SPEED_STOP;
+static int64_t last_trimmer_update_ms = 0;
+static int32_t target_trimmer_state = 0; // Memoria del último estado de la bordeadora Deseado
 
 // =====================================================
 // GLOBALES micro-ROS
@@ -145,81 +153,94 @@ static void pwm_write(ledc_channel_t channel, uint32_t duty)
     ledc_update_duty(PWM_MODE, channel);
 }
 
-static void set_outputs(uint32_t m1_in1, uint32_t m1_in2, uint32_t m2_in1, uint32_t m2_in2)
-{
-    pwm_write(CH_M1_IN1, m1_in1);
-    pwm_write(CH_M1_IN2, m1_in2);
-    pwm_write(CH_M2_IN1, m2_in1);
-    pwm_write(CH_M2_IN2, m2_in2);
-}
-
 static void stop_all_motors(void)
 {
-    set_outputs(0, 0, 0, 0);
+    pwm_write(PWM_CH_LEFT, 0);
+    pwm_write(PWM_CH_RIGHT, 0);
 }
 
-// Traduce el comando logico del robot al driver MC33926
+// Aplica el comando físico usando PWM y Dirección digital
 static void apply_motor_command(int32_t l_dir, int32_t l_pwm, int32_t r_dir, int32_t r_pwm)
 {
-    uint32_t m1_in1 = 0;
-    uint32_t m1_in2 = 0;
-    uint32_t m2_in1 = 0;
-    uint32_t m2_in2 = 0;
+    gpio_set_level(DIR1_PIN, (l_dir == DIR_FORWARD) ? 1 : 0);   // izquierda
+    gpio_set_level(DIR2_PIN, (r_dir == DIR_FORWARD) ? 1 : 0);   // derecha
 
-    // Motor izquierdo
-    if (l_pwm > 0) {
-        if (l_dir == DIR_FORWARD) {
-            m1_in1 = (uint32_t)l_pwm;
-            m1_in2 = 0;
-        } else { // DIR_REVERSE
-            m1_in1 = 0;
-            m1_in2 = (uint32_t)l_pwm;
-        }
-    }
-
-    // Motor derecho
-    if (r_pwm > 0) {
-        if (r_dir == DIR_FORWARD) {
-            m2_in1 = 0;
-            m2_in2 = (uint32_t)r_pwm;
-        } else { // DIR_REVERSE
-            m2_in1 = (uint32_t)r_pwm;
-            m2_in2 = 0;
-        }
-    }
-
-    set_outputs(m1_in1, m1_in2, m2_in1, m2_in2);
+    pwm_write(PWM_CH_LEFT,  (uint32_t)l_pwm);
+    pwm_write(PWM_CH_RIGHT, (uint32_t)r_pwm);
 }
 
-static void ledc_init_channel(gpio_num_t pin, ledc_channel_t channel)
+static void sabertooth_hw_init(void)
 {
-    ledc_channel_config_t ch_conf = {
-        .gpio_num   = pin,
-        .speed_mode = PWM_MODE,
-        .channel    = channel,
-        .intr_type  = LEDC_INTR_DISABLE,
-        .timer_sel  = PWM_TIMER,
-        .duty       = 0,
-        .hpoint     = 0
+    uart_config_t uart_config = {
+        .baud_rate = SABERTOOTH_BAUD_RATE,
+        .data_bits = UART_DATA_8_BITS,
+        .parity    = UART_PARITY_DISABLE,
+        .stop_bits = UART_STOP_BITS_1,
+        .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
+        .source_clk = UART_SCLK_DEFAULT,
     };
-    ESP_ERROR_CHECK(ledc_channel_config(&ch_conf));
+    
+    ESP_ERROR_CHECK(uart_driver_install(SABERTOOTH_UART_NUM, 256, 0, 0, NULL, 0));
+    ESP_ERROR_CHECK(uart_param_config(SABERTOOTH_UART_NUM, &uart_config));
+    ESP_ERROR_CHECK(uart_set_pin(
+        SABERTOOTH_UART_NUM,
+        SABERTOOTH_TX_PIN,
+        UART_PIN_NO_CHANGE, // Sin RX
+        UART_PIN_NO_CHANGE,
+        UART_PIN_NO_CHANGE
+    ));
+
+    // Enviar comando de parada inicial (64) para limpiar la línea UART y sincronizar el driver
+    vTaskDelay(pdMS_TO_TICKS(50));
+    uart_write_bytes(SABERTOOTH_UART_NUM, (const char[]){TRIMMER_SPEED_STOP}, 1);
+    vTaskDelay(pdMS_TO_TICKS(50));
 }
 
 static esp_err_t motor_hw_init(void)
 {
-    ledc_timer_config_t timer_conf = {
+    sabertooth_hw_init(); // Inicializar el UART del Sabertooth
+    gpio_config_t io_conf = {
+        .pin_bit_mask = (1ULL << DIR1_PIN) | (1ULL << DIR2_PIN),
+        .mode = GPIO_MODE_OUTPUT,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE
+    };
+    ESP_ERROR_CHECK(gpio_config(&io_conf));
+
+    gpio_set_level(DIR1_PIN, 0);
+    gpio_set_level(DIR2_PIN, 0);
+
+    ledc_timer_config_t ledc_timer = {
         .speed_mode       = PWM_MODE,
         .duty_resolution  = PWM_RESOLUTION,
         .timer_num        = PWM_TIMER,
         .freq_hz          = PWM_FREQ_HZ,
         .clk_cfg          = LEDC_AUTO_CLK
     };
-    ESP_ERROR_CHECK(ledc_timer_config(&timer_conf));
+    ESP_ERROR_CHECK(ledc_timer_config(&ledc_timer));
 
-    ledc_init_channel(M1_IN1_PIN, CH_M1_IN1);
-    ledc_init_channel(M1_IN2_PIN, CH_M1_IN2);
-    ledc_init_channel(M2_IN1_PIN, CH_M2_IN1);
-    ledc_init_channel(M2_IN2_PIN, CH_M2_IN2);
+    ledc_channel_config_t ledc_left = {
+        .gpio_num   = PWM1_PIN,
+        .speed_mode = PWM_MODE,
+        .channel    = PWM_CH_LEFT,
+        .intr_type  = LEDC_INTR_DISABLE,
+        .timer_sel  = PWM_TIMER,
+        .duty       = 0,
+        .hpoint     = 0
+    };
+    ESP_ERROR_CHECK(ledc_channel_config(&ledc_left));
+
+    ledc_channel_config_t ledc_right = {
+        .gpio_num   = PWM2_PIN,
+        .speed_mode = PWM_MODE,
+        .channel    = PWM_CH_RIGHT,
+        .intr_type  = LEDC_INTR_DISABLE,
+        .timer_sel  = PWM_TIMER,
+        .duty       = 0,
+        .hpoint     = 0
+    };
+    ESP_ERROR_CHECK(ledc_channel_config(&ledc_right));
 
     stop_all_motors();
     return ESP_OK;
@@ -295,6 +316,11 @@ static bool is_valid_duration(int32_t duration_ms)
     return (duration_ms >= 0);
 }
 
+static bool is_valid_bordeadora(int32_t val)
+{
+    return (val == 0 || val == 1);
+}
+
 static bool is_stop_command(int32_t l_pwm, int32_t r_pwm)
 {
     return (l_pwm == 0 && r_pwm == 0);
@@ -312,20 +338,24 @@ static void motion_cmd_callback(const void * msgin)
         return;
     }
 
-    int32_t cmd_id      = msg->data.data[0];
-    int32_t l_dir       = msg->data.data[1];
-    int32_t l_pwm       = msg->data.data[2];
-    int32_t r_dir       = msg->data.data[3];
-    int32_t r_pwm       = msg->data.data[4];
-    int32_t duration_ms = msg->data.data[5];
+    int32_t cmd_id        = msg->data.data[0];
+    int32_t l_dir         = msg->data.data[1];
+    int32_t l_pwm         = msg->data.data[2];
+    int32_t r_dir         = msg->data.data[3];
+    int32_t r_pwm         = msg->data.data[4];
+    int32_t duration_ms   = msg->data.data[5];
+    int32_t bordeadora_on = msg->data.data[6];
 
     if (!is_valid_dir(l_dir) || !is_valid_dir(r_dir) ||
         !is_valid_pwm(l_pwm) || !is_valid_pwm(r_pwm) ||
-        !is_valid_duration(duration_ms))
+        !is_valid_duration(duration_ms) || !is_valid_bordeadora(bordeadora_on))
     {
         publish_status_now(cmd_id, STATE_ERROR, 0, 0, 0, 0, 0);
         return;
     }
+
+    // Guardar estado de la bordeadora con memoria
+    target_trimmer_state = bordeadora_on;
 
     // STOP:
     // si ya habia un comando activo, lo aborta
@@ -352,15 +382,16 @@ static void motion_cmd_callback(const void * msgin)
     }
 
     // Guardar comando
-    active_cmd.cmd_id      = cmd_id;
-    active_cmd.l_dir       = l_dir;
-    active_cmd.l_pwm       = l_pwm;
-    active_cmd.r_dir       = r_dir;
-    active_cmd.r_pwm       = r_pwm;
-    active_cmd.duration_ms = duration_ms;
-    active_cmd.start_ms    = esp_timer_get_time() / 1000LL;
-    active_cmd.continuous  = (duration_ms == 0);
-    active_cmd.active      = true;
+    active_cmd.cmd_id        = cmd_id;
+    active_cmd.l_dir         = l_dir;
+    active_cmd.l_pwm         = l_pwm;
+    active_cmd.r_dir         = r_dir;
+    active_cmd.r_pwm         = r_pwm;
+    active_cmd.duration_ms   = duration_ms;
+    active_cmd.bordeadora_on = bordeadora_on;
+    active_cmd.start_ms      = esp_timer_get_time() / 1000LL;
+    active_cmd.continuous    = (duration_ms == 0);
+    active_cmd.active        = true;
 
     current_state = STATE_ACCEPTED;
     publish_status_now(
@@ -405,7 +436,14 @@ void micro_ros_task(void * arg)
     rcl_allocator_t allocator = rcl_get_default_allocator();
     rclc_support_t support;
 
-    RCCHECK(rclc_support_init(&support, 0, NULL, &allocator));
+    // Bucle de reintento de conexión con el agente micro-ROS (completamente silencioso para no corromper UART0)
+    while (1) {
+        rcl_ret_t rc = rclc_support_init(&support, 0, NULL, &allocator);
+        if (rc == RCL_RET_OK) {
+            break;
+        }
+        vTaskDelay(1000 / portTICK_PERIOD_MS);
+    }
 
     rcl_node_t node;
     RCCHECK(rclc_node_init_default(&node, "esp32_motor_node", "", &support));
@@ -429,7 +467,6 @@ void micro_ros_task(void * arg)
     motion_cmd_msg.layout.data_offset = 0;
     motion_cmd_msg.data.data = (int32_t *) malloc(CMD_LEN * sizeof(int32_t));
     if (motion_cmd_msg.data.data == NULL) {
-        ESP_LOGE("MOTOR", "No se pudo reservar motion_cmd_msg");
         vTaskDelete(NULL);
     }
     motion_cmd_msg.data.size = CMD_LEN;
@@ -443,7 +480,6 @@ void micro_ros_task(void * arg)
     motion_status_msg.layout.data_offset = 0;
     motion_status_msg.data.data = (int32_t *) malloc(STATUS_LEN * sizeof(int32_t));
     if (motion_status_msg.data.data == NULL) {
-        ESP_LOGE("MOTOR", "No se pudo reservar motion_status_msg");
         vTaskDelete(NULL);
     }
     motion_status_msg.data.size = STATUS_LEN;
@@ -471,6 +507,32 @@ void micro_ros_task(void * arg)
         rclc_executor_spin_some(&executor, RCL_MS_TO_NS(10));
 
         int64_t now_ms = esp_timer_get_time() / 1000LL;
+
+        // Control automático de rampa de la bordeadora (Soft-Start)
+        if (now_ms - last_trimmer_update_ms >= TRIMMER_RAMP_MS) {
+            last_trimmer_update_ms = now_ms;
+            
+            if (target_trimmer_state == 1) {
+                // Rampa ascendente
+                if (current_trimmer_speed == TRIMMER_SPEED_STOP) {
+                    // Salto inicial para evitar el "cogging" (tirón hacia atrás por bajo voltaje)
+                    current_trimmer_speed = TRIMMER_SPEED_MIN_START;
+                    uart_write_bytes(SABERTOOTH_UART_NUM, (const char[]){current_trimmer_speed}, 1);
+                } else if (current_trimmer_speed < TRIMMER_SPEED_MAX) {
+                    current_trimmer_speed += TRIMMER_RAMP_STEP;
+                    if (current_trimmer_speed > TRIMMER_SPEED_MAX) {
+                        current_trimmer_speed = TRIMMER_SPEED_MAX;
+                    }
+                    uart_write_bytes(SABERTOOTH_UART_NUM, (const char[]){current_trimmer_speed}, 1);
+                }
+            } else {
+                // Apagado inmediato (o rampa descendente si se desea, pero inmediato es más seguro)
+                if (current_trimmer_speed != TRIMMER_SPEED_STOP) {
+                    current_trimmer_speed = TRIMMER_SPEED_STOP;
+                    uart_write_bytes(SABERTOOTH_UART_NUM, (const char[]){TRIMMER_SPEED_STOP}, 1);
+                }
+            }
+        }
 
         // Comando temporizado
         if (active_cmd.active && !active_cmd.continuous) {
