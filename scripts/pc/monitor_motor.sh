@@ -2,5 +2,5 @@
 set -e
 PORT=${1:-/dev/ttyUSB0}
 . ~/esp/esp-idf/export.sh
-cd ~/robot_cortadora/firmware/esp32_motor/active
+cd ~/robot_cortadora/firmware/esp32_motor/active/active
 idf.py -p "$PORT" monitor

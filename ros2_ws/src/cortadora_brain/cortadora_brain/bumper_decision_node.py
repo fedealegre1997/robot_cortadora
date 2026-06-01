@@ -130,10 +130,11 @@ class SensorDecisionNode(Node):
         l_pwm: int,
         r_dir: int,
         r_pwm: int,
-        duration_ms: int
+        duration_ms: int,
+        bordeadora_on: int = 0
     ):
         msg = Int32MultiArray()
-        msg.data = [cmd_id, l_dir, l_pwm, r_dir, r_pwm, duration_ms]
+        msg.data = [cmd_id, l_dir, l_pwm, r_dir, r_pwm, duration_ms, bordeadora_on]
         self.motion_cmd_pub.publish(msg)
         self.get_logger().info(f'CMD -> id={cmd_id}, data={list(msg.data)}')
 
@@ -143,7 +144,8 @@ class SensorDecisionNode(Node):
             cmd_id,
             self.DIR_FORWARD, self.forward_pwm,
             self.DIR_FORWARD, self.forward_pwm,
-            0
+            0,
+            1  # Bordeadora ON
         )
         self.mode = 'FORWARDING'
         self.pending_cmd_id = None
@@ -152,7 +154,7 @@ class SensorDecisionNode(Node):
     def send_stop(self):
         cmd_id = self.new_cmd_id()
         # En el nodo motor, STOP se detecta por PWM = 0 en ambos lados
-        self.publish_motion_cmd(cmd_id, 0, 0, 0, 0, 1)
+        self.publish_motion_cmd(cmd_id, 0, 0, 0, 0, 1, 0) # Bordeadora OFF
         self.mode = 'WAIT_STOP_DONE'
         self.pending_cmd_id = cmd_id
         self.get_logger().info(f'Estado -> WAIT_STOP_DONE (cmd_id={cmd_id})')
@@ -163,7 +165,8 @@ class SensorDecisionNode(Node):
             cmd_id,
             self.DIR_REVERSE, self.reverse_pwm,
             self.DIR_REVERSE, self.reverse_pwm,
-            self.reverse_time_ms
+            self.reverse_time_ms,
+            0  # Bordeadora OFF por seguridad
         )
         self.mode = 'WAIT_REVERSE_DONE'
         self.pending_cmd_id = cmd_id
@@ -278,7 +281,7 @@ class SensorDecisionNode(Node):
     # ========================================================
     def send_stop_if_possible(self):
         try:
-            self.publish_motion_cmd(9999, 0, 0, 0, 0, 1)
+            self.publish_motion_cmd(9999, 0, 0, 0, 0, 1, 0)
         except Exception:
             pass
 

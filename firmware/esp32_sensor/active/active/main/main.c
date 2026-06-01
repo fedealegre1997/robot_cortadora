@@ -1,34 +1,29 @@
-//  Codigo Main de sensores con tareas FreeRTOS y publisher micro-ROS
-//      Actualmente incluye los sensores:
-//          * Finales de Carrera
-//          * MPU-6500
-//          * Ultrasonicos (3 sensores reales)
-//          * GPS FSTR2
+//  Firmware ESP32 — Adquisicion de Sensores con micro-ROS
+//  Placa: ESP32 (clasico, 2MB Flash)
+//  Solo publica, no suscribe ningun topic.
 //
-//  Descripcion:
-//      Este codigo se encarga de la adquisicion, procesamiento y publicacion
-//      de los datos de sensores del ESP32. La arquitectura esta dividida en
-//      tareas FreeRTOS separadas para mejorar la organizacion del sistema:
-//          - bumper_task: lectura de finales de carrera
-//          - imu_task: lectura y calculo de orientacion con el MPU-6500
-//          - ultrasonic_task: lectura secuencial de los sensores ultrasonicos
-//          - gps_task: lectura y parseo de tramas NMEA del GPS FSTR2
-//          - micro_ros_task: publicacion de todos los datos en un topic array
+//  Sensores incluidos:
+//      * Finales de Carrera (x3, GPIO 18, 22, 19)
+//      * MPU-6500 — IMU (I2C, GPIO 21 SDA / 23 SCL)
+//      * Ultrasonicos HC-SR04 (x3, TRIG: 25,26,33 — ECHO: 32,27,35)
+//      * GPS FSTR2 (UART2, GPIO 16 RX / 17 TX, 9600 baud)
 //
-//      Los datos son compartidos mediante variables auxiliares protegidas
-//      con mutex, y luego publicados por micro-ROS en un arreglo de tipo:
-//
+//  Protocolo de publicacion:
+//      Topic: /sensores | Float32MultiArray | reliable, 50 ms
 //      [bumper_izq, bumper_centro, bumper_der,
 //       ultra_izq, ultra_centro, ultra_der,
 //       roll, pitch, yaw,
 //       gps_lat, gps_lon, gps_alt, gps_fix]
 //
-//      Distribucion de tareas por core:
-//          - Core 0: ultrasonic_task, gps_task
-//          - Core 1: bumper_task, imu_task, micro_ros_task
+//  Arquitectura de tareas FreeRTOS:
+//      Core 0: ultrasonic_task (~180 ms), gps_task (continua)
+//      Core 1: bumper_task (10 ms), imu_task (10 ms), micro_ros_task (50 ms)
+//      Datos compartidos entre tareas mediante variables globales con mutex.
 //
-//  Version 6.0
-//  Fecha: 22/04/2026
+//  NOTA: No usar printf() en ninguna tarea. La UART0 es exclusiva de micro-ROS.
+//
+//  Version: 6.1
+//  Fecha: 31/05/2026
 //  Autor: Angel Alegre
 
 #include <stdio.h>
@@ -522,8 +517,6 @@ void ultrasonic_task(void *arg)
         g_t_der_us = esp_timer_get_time();
 
         xSemaphoreGive(g_data_mutex);
-
-        printf("ULTRA -> IZQ=%.2f  CEN=%.2f  DER=%.2f\n", izq, cen, der);
 
         vTaskDelay(pdMS_TO_TICKS(DESFASE_MS));
     }
