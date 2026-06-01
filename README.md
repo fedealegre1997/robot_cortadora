@@ -91,7 +91,7 @@ ls /dev/ttyUSB* /dev/ttyACM* 2>/dev/null
 
 ~/robot_cortadora/scripts/pc/build_motor.sh
 ~/robot_cortadora/scripts/pc/flash_motor.sh /dev/ttyUSB1
-~/robot_cortadora/scripts/pc/run_agent_serial.sh /dev/ttyUSB1 -v6
+~/robot_cortadora/scripts/pc/run_agent_serial.sh /dev/ttyACM0 -v6
 
 ros2 topic echo /motion_status
 

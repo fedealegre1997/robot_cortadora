@@ -1,0 +1,58 @@
+RESUMEN MOTOR BLDC
+
+En el proyecto se utilizó un motor BLDC trifásico con sensores Hall. Este motor posee 8 cables: 3 cables gruesos correspondientes a las fases de potencia y 5 cables finos correspondientes a la alimentación y señales de los sensores Hall.
+
+El motor no se conecta directamente a 24 V, ya que necesita un driver BLDC que realice la conmutación electrónica de las fases.
+
+Driver utilizado:
+Advanced Motion Controls Brushless PWM Servo Amplifier.
+Modelo físico observado: CBE12A1C.
+Datasheet de referencia compatible: AMC B12A6 / BE12A6.
+Este driver recibe alimentación de 24 V DC, lee las señales Hall del motor y conmuta las tres fases del BLDC. Además, permite controlar el sentido y la velocidad mediante una entrada analógica de referencia, probada inicialmente con un potenciómetro de 10 kΩ.
+
+Motor utilizado: BLDC trifásico con sensores Hall.
+Cantidad de cables: 8 en total.
+- 3 cables gruesos: fases del motor.
+- 5 cables finos: alimentación y señales Hall.
+
+Fases del motor:
+- Amarillo grueso → P2-1 MOTOR A
+- Rojo grueso → P2-2 MOTOR B
+- Negro grueso → P2-3 MOTOR C
+
+Sensores Hall:
+- Rojo/blanco fino → P1-10 +V HALL OUT
+- Negro/blanco fino → P1-11 GND
+- Azul fino → P1-12 HALL 1
+- Verde fino → P1-13 HALL 2
+- Blanco fino → P1-14 HALL 3
+
+Alimentación del driver:
+- +24 V → P2-5 HIGH VOLTAGE
+- GND → P2-4 POWER GND
+
+Prueba realizada:
+Se confirmó que los tres cables gruesos son fases del motor midiendo aproximadamente 0,4 Ω entre cada par. 
+Luego se probaron distintas combinaciones de fases y sensores Hall hasta encontrar la conexión correcta.
+
+Resultado:
+Con la combinación final, el motor gira correctamente en ambos sentidos usando el potenciómetro como referencia analógica del driver.
+
+Potenciómetro de prueba:
+- Potenciómetro de 10 kΩ.
+- Rango medido de referencia: aprox. -9,93 V a +9,93 V.
+- El potenciómetro controla sentido y velocidad de giro.
+
+Observación:
+El motor no debe conectarse directamente a 24 V. Debe ser controlado mediante el driver BLDC. 
+En la integración final, el ESP32 deberá reemplazar al potenciómetro mediante una señal analógica equivalente.
+
+
+
+P2-1 MOTOR A = Amarillo grueso
+P2-2 MOTOR B = Rojo grueso
+P2-3 MOTOR C = Negro grueso
+
+P1-12 HALL 1 = Azul
+P1-13 HALL 2 = Verde
+P1-14 HALL 3 = Blanco

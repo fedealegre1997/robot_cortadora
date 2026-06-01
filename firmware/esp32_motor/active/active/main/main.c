@@ -1,17 +1,24 @@
-//  Codigo Main Motores con subscriber y publisher micro-ROS
-//  Driver actual: PWM + DIR (Generico)
-//  Mantiene el protocolo:
-//      motion_cmd    = [cmd_id, L_dir, L_pwm, R_dir, R_pwm, T_ms]
+//  Firmware ESP32-S3 — Control de Motores con micro-ROS
+//  Placa: ESP32-S3-WROOM-1 (N8R2, 8MB Flash, 2MB PSRAM)
+//  Driver de traccion: MC33926 (puente H, 4 canales LEDC — GPIO 4,5,6,7)
+//  Bordeadora: Sabertooth 2x25 v2, modo serial simplificado (UART2 TX, GPIO 17, 9600 baud)
+//  Cortadora central: AMC CBE12A1C, habilitacion por GPIO 18 → P1-9 INHIBIT (active LOW)
+//
+//  Protocolo:
+//      motion_cmd    = [cmd_id, L_dir, L_pwm, R_dir, R_pwm, T_ms, bordeadora_on, cortadora_on]
 //      motion_status = [cmd_id, state, L_dir, L_pwm, R_dir, R_pwm, remaining_ms]
 //
 //  Descripcion:
-//      Este firmware recibe comandos de movimiento desde el nodo central,
-//      los traduce a la logica real del driver de 1 PWM + 1 DIR por motor
-//      y publica el estado de ejecucion del comando actual.
+//      Recibe comandos de movimiento del Brain (ROS 2) por micro-ROS serial (UART0).
+//      Traduce la trama al driver MC33926 (2 canales PWM por motor).
+//      Controla la bordeadora (rampa soft-start anti-cogging, Sabertooth serial).
+//      Controla la cortadora central brushless (GPIO 18 HIGH = habilitado, LOW = inhibido).
+//      Los accesorios se aplican siempre, independientemente del estado de traccion.
+//      Publica el estado de ejecucion en /motion_status cada 200 ms (EXECUTING) o 1 s (IDLE).
 //
-//  Version: 2.1
+//  Version: 2.2
 //  Autor: Angel Alegre
-//  Ultima verificacion: 17/05/2026 22:17
+//  Ultima verificacion: 31/05/2026
 
 #include <stdio.h>
 #include <string.h>
@@ -45,15 +52,15 @@
 #define RCSOFTCHECK(fn) { rcl_ret_t temp_rc = fn; (void)temp_rc; }
 
 // =====================================================
-// DRIVER / MOTORES (PWM + DIR)
+// DRIVER / MOTORES MC33926
 // =====================================================
-// Izquierda
-#define PWM1_PIN   GPIO_NUM_25
-#define DIR1_PIN   GPIO_NUM_26
+// Izquierda (M1)
+#define M1_IN1_PIN   GPIO_NUM_4
+#define M1_IN2_PIN   GPIO_NUM_5
 
-// Derecha
-#define PWM2_PIN   GPIO_NUM_27
-#define DIR2_PIN   GPIO_NUM_14
+// Derecha (M2)
+#define M2_IN1_PIN   GPIO_NUM_6
+#define M2_IN2_PIN   GPIO_NUM_7
 
 // =====================================================
 // PWM
@@ -65,8 +72,10 @@
 #define PWM_MODE          LEDC_LOW_SPEED_MODE
 #define PWM_RESOLUTION    LEDC_TIMER_8_BIT
 
-#define PWM_CH_LEFT       LEDC_CHANNEL_0
-#define PWM_CH_RIGHT      LEDC_CHANNEL_1
+#define CH_M1_IN1         LEDC_CHANNEL_0
+#define CH_M1_IN2         LEDC_CHANNEL_1
+#define CH_M2_IN1         LEDC_CHANNEL_2
+#define CH_M2_IN2         LEDC_CHANNEL_3
 
 // =====================================================
 // TOPICOS
@@ -76,10 +85,10 @@ static const char * TOPIC_MOTION_STATUS = "motion_status";
 
 // =====================================================
 // PROTOCOLO
-// motion_cmd    = [cmd_id, L_dir, L_pwm, R_dir, R_pwm, T_ms, bordeadora_on]
+// motion_cmd    = [cmd_id, L_dir, L_pwm, R_dir, R_pwm, T_ms, bordeadora_on, cortadora_on]
 // motion_status = [cmd_id, state, L_dir, L_pwm, R_dir, R_pwm, remaining_ms]
 // =====================================================
-#define CMD_LEN     7
+#define CMD_LEN     8
 #define STATUS_LEN  7
 
 // =====================================================
@@ -88,6 +97,11 @@ static const char * TOPIC_MOTION_STATUS = "motion_status";
 #define SABERTOOTH_UART_NUM   UART_NUM_2
 #define SABERTOOTH_TX_PIN     GPIO_NUM_17
 #define SABERTOOTH_BAUD_RATE  9600
+
+// =====================================================
+// CORTADORA CENTRAL (Brushless AMC CBE12A1C)
+// =====================================================
+#define CORTADORA_ENABLE_PIN  GPIO_NUM_18
 
 #define TRIMMER_SPEED_STOP    64
 #define TRIMMER_SPEED_MIN_START 74 // Salto de potencia inicial (aprox 15%) para vencer inercia
@@ -155,18 +169,38 @@ static void pwm_write(ledc_channel_t channel, uint32_t duty)
 
 static void stop_all_motors(void)
 {
-    pwm_write(PWM_CH_LEFT, 0);
-    pwm_write(PWM_CH_RIGHT, 0);
+    pwm_write(CH_M1_IN1, 0);
+    pwm_write(CH_M1_IN2, 0);
+    pwm_write(CH_M2_IN1, 0);
+    pwm_write(CH_M2_IN2, 0);
 }
 
-// Aplica el comando físico usando PWM y Dirección digital
+// Aplica el comando físico usando PWM y Dirección digital en MC33926
 static void apply_motor_command(int32_t l_dir, int32_t l_pwm, int32_t r_dir, int32_t r_pwm)
 {
-    gpio_set_level(DIR1_PIN, (l_dir == DIR_FORWARD) ? 1 : 0);   // izquierda
-    gpio_set_level(DIR2_PIN, (r_dir == DIR_FORWARD) ? 1 : 0);   // derecha
+    // Motor Izquierdo (M1)
+    if (l_pwm == 0) {
+        pwm_write(CH_M1_IN1, 0);
+        pwm_write(CH_M1_IN2, 0);
+    } else if (l_dir == DIR_FORWARD) {
+        pwm_write(CH_M1_IN1, (uint32_t)l_pwm);
+        pwm_write(CH_M1_IN2, 0);
+    } else {
+        pwm_write(CH_M1_IN1, 0);
+        pwm_write(CH_M1_IN2, (uint32_t)l_pwm);
+    }
 
-    pwm_write(PWM_CH_LEFT,  (uint32_t)l_pwm);
-    pwm_write(PWM_CH_RIGHT, (uint32_t)r_pwm);
+    // Motor Derecho (M2)
+    if (r_pwm == 0) {
+        pwm_write(CH_M2_IN1, 0);
+        pwm_write(CH_M2_IN2, 0);
+    } else if (r_dir == DIR_FORWARD) {
+        pwm_write(CH_M2_IN1, 0);
+        pwm_write(CH_M2_IN2, (uint32_t)r_pwm);
+    } else {
+        pwm_write(CH_M2_IN1, (uint32_t)r_pwm);
+        pwm_write(CH_M2_IN2, 0);
+    }
 }
 
 static void sabertooth_hw_init(void)
@@ -196,20 +230,34 @@ static void sabertooth_hw_init(void)
     vTaskDelay(pdMS_TO_TICKS(50));
 }
 
+static void ledc_init_channel(gpio_num_t pin, ledc_channel_t channel)
+{
+    ledc_channel_config_t ch_conf = {
+        .gpio_num   = pin,
+        .speed_mode = PWM_MODE,
+        .channel    = channel,
+        .intr_type  = LEDC_INTR_DISABLE,
+        .timer_sel  = PWM_TIMER,
+        .duty       = 0,
+        .hpoint     = 0
+    };
+    ESP_ERROR_CHECK(ledc_channel_config(&ch_conf));
+}
+
 static esp_err_t motor_hw_init(void)
 {
     sabertooth_hw_init(); // Inicializar el UART del Sabertooth
-    gpio_config_t io_conf = {
-        .pin_bit_mask = (1ULL << DIR1_PIN) | (1ULL << DIR2_PIN),
-        .mode = GPIO_MODE_OUTPUT,
-        .pull_up_en = GPIO_PULLUP_DISABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_DISABLE
-    };
-    ESP_ERROR_CHECK(gpio_config(&io_conf));
 
-    gpio_set_level(DIR1_PIN, 0);
-    gpio_set_level(DIR2_PIN, 0);
+    // Cortadora central: GPIO de habilitación, arranca deshabilitada
+    gpio_config_t cortadora_gpio = {
+        .pin_bit_mask = (1ULL << CORTADORA_ENABLE_PIN),
+        .mode         = GPIO_MODE_OUTPUT,
+        .pull_up_en   = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type    = GPIO_INTR_DISABLE,
+    };
+    ESP_ERROR_CHECK(gpio_config(&cortadora_gpio));
+    gpio_set_level(CORTADORA_ENABLE_PIN, 0);
 
     ledc_timer_config_t ledc_timer = {
         .speed_mode       = PWM_MODE,
@@ -220,27 +268,10 @@ static esp_err_t motor_hw_init(void)
     };
     ESP_ERROR_CHECK(ledc_timer_config(&ledc_timer));
 
-    ledc_channel_config_t ledc_left = {
-        .gpio_num   = PWM1_PIN,
-        .speed_mode = PWM_MODE,
-        .channel    = PWM_CH_LEFT,
-        .intr_type  = LEDC_INTR_DISABLE,
-        .timer_sel  = PWM_TIMER,
-        .duty       = 0,
-        .hpoint     = 0
-    };
-    ESP_ERROR_CHECK(ledc_channel_config(&ledc_left));
-
-    ledc_channel_config_t ledc_right = {
-        .gpio_num   = PWM2_PIN,
-        .speed_mode = PWM_MODE,
-        .channel    = PWM_CH_RIGHT,
-        .intr_type  = LEDC_INTR_DISABLE,
-        .timer_sel  = PWM_TIMER,
-        .duty       = 0,
-        .hpoint     = 0
-    };
-    ESP_ERROR_CHECK(ledc_channel_config(&ledc_right));
+    ledc_init_channel(M1_IN1_PIN, CH_M1_IN1);
+    ledc_init_channel(M1_IN2_PIN, CH_M1_IN2);
+    ledc_init_channel(M2_IN1_PIN, CH_M2_IN1);
+    ledc_init_channel(M2_IN2_PIN, CH_M2_IN2);
 
     stop_all_motors();
     return ESP_OK;
@@ -345,17 +376,20 @@ static void motion_cmd_callback(const void * msgin)
     int32_t r_pwm         = msg->data.data[4];
     int32_t duration_ms   = msg->data.data[5];
     int32_t bordeadora_on = msg->data.data[6];
+    int32_t cortadora_on  = msg->data.data[7];
 
     if (!is_valid_dir(l_dir) || !is_valid_dir(r_dir) ||
         !is_valid_pwm(l_pwm) || !is_valid_pwm(r_pwm) ||
-        !is_valid_duration(duration_ms) || !is_valid_bordeadora(bordeadora_on))
+        !is_valid_duration(duration_ms) || !is_valid_bordeadora(bordeadora_on) ||
+        !is_valid_bordeadora(cortadora_on))
     {
         publish_status_now(cmd_id, STATE_ERROR, 0, 0, 0, 0, 0);
         return;
     }
 
-    // Guardar estado de la bordeadora con memoria
+    // Accesorios: se aplican siempre, independientemente del comando de movimiento
     target_trimmer_state = bordeadora_on;
+    gpio_set_level(CORTADORA_ENABLE_PIN, (uint32_t)cortadora_on);
 
     // STOP:
     // si ya habia un comando activo, lo aborta
