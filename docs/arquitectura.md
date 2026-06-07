@@ -114,53 +114,73 @@ El nodo `esp32_motor_node` se comunica con el Brain mediante dos topics ROS 2:
 
 ---
 
+## Control local con encoders (v3.0)
+
+Desde la versión 3.0 el motor **no recibe PWM crudo**: recibe comandos de **alto nivel** (modo + parámetro) y cierra el lazo de control localmente con los encoders. Los encoders son la fuente de verdad del movimiento; el IMU del sensor queda solo para monitoreo en el Brain.
+
+- **ADELANTE / ATRAS:** PID de velocidad por rueda + corrección de rumbo por diferencia de **cuentas acumuladas** de encoder (mantiene la recta autocorrigiéndose).
+- **GIRO_IZQ / GIRO_DER:** giro pivot por **velocidad regulada** (ruedas opuestas). Se regula la velocidad de giro (`GIRO_RPM`) con el PID de velocidad, midiendo el ángulo por encoders; al acercarse al objetivo desacelera (`GIRO_DECEL_DEG`, `GIRO_RPM_MIN`) y frena al llegar (`GIRO_TOL_DEG`). **Importante:** se regula la *velocidad*, no se capa el PWM → el lazo aplica todo el torque que haga falta (hasta 255) para girar bajo carga, pero a velocidad gentil y pareja.
+- **Arranque suave:** slew de PWM (`PWM_SLEW_RATE`) en todos los modos + rampa de setpoint (`RPM_ACCEL`) en recta y en giro, para evitar el "patadón" inicial.
+
+Constantes físicas: `CPR_OUT = 5760` cuentas/vuelta (16 × x4 × 90:1), radio de rueda `R = 0.075 m`, distancia entre ruedas `L = 0.50 m` → **~53.3 cuentas por grado** de rotación en giro pivot.
+
+---
+
 ## Formato de motion_cmd
 
 ```
-[cmd_id, L_dir, L_pwm, R_dir, R_pwm, T_ms, bordeadora_on, cortadora_on]
+[cmd_id, modo, param, bordeadora_on, cortadora_on]
 ```
 
 | Campo | Índice | Valores válidos | Descripción |
 |---|---|---|---|
 | `cmd_id` | 0 | Entero ≥ 0 | Identificador del comando. El status lo refleja de vuelta. |
-| `L_dir` | 1 | `0` = reversa, `1` = adelante | Dirección motor izquierdo |
-| `L_pwm` | 2 | `0` a `255` | Potencia motor izquierdo |
-| `R_dir` | 3 | `0` = reversa, `1` = adelante | Dirección motor derecho |
-| `R_pwm` | 4 | `0` a `255` | Potencia motor derecho |
-| `T_ms` | 5 | `0` = continuo, `>0` = ms | Duración del movimiento. Con 0 corre hasta recibir stop. |
-| `bordeadora_on` | 6 | `0` = apagada, `1` = encendida | Activa/desactiva la bordeadora (Sabertooth, rampa soft-start) |
-| `cortadora_on` | 7 | `0` = apagada, `1` = encendida | Habilita/inhibe la cortadora central brushless (GPIO 18 → P1-9 INHIBIT del driver AMC) |
+| `modo` | 1 | `0`–`5` | Modo de movimiento (ver tabla abajo) |
+| `param` | 2 | según modo | RPM (ADELANTE/ATRAS) o grados (GIRO_IZQ/GIRO_DER). Ignorado en STOP. |
+| `bordeadora_on` | 3 | `0` = apagada, `1` = encendida | Activa/desactiva la bordeadora (Sabertooth, rampa soft-start) |
+| `cortadora_on` | 4 | `0` = apagada, `1` = encendida | Habilita/inhibe la cortadora central brushless (GPIO 18 → P1-9 INHIBIT del driver AMC) |
 
-> **Nota:** `bordeadora_on` y `cortadora_on` se aplican **siempre**, sin importar si los motores se mueven o no. Esto permite controlar los accesorios de forma independiente.
+### Modos de movimiento
+
+| Valor | Nombre | `param` | Control |
+|---|---|---|---|
+| `0` | `STOP` | (ignorado) | Detiene la tracción |
+| `1` | `ADELANTE` | RPM base | Velocidad + corrección de rumbo |
+| `2` | `ATRAS` | RPM base | Velocidad + corrección de rumbo |
+| `3` | `GIRO_IZQ` | grados | Posición (pivot: izq atrás, der adelante) |
+| `4` | `GIRO_DER` | grados | Posición (pivot: izq adelante, der atrás) |
+| `5` | `PIVOT` | (a definir) | Placeholder — por seguridad hace STOP |
+
+> **Notas:**
+> - `bordeadora_on` y `cortadora_on` se aplican **siempre**, sin importar si los motores se mueven o no.
+> - **No existe `T_ms`:** los movimientos son continuos hasta recibir otro comando. El motor está **siempre atento**: cualquier comando nuevo reemplaza al activo de inmediato.
+> - **Excepción anti-hipo:** si la nueva orden tiene el mismo `modo` y `param` que la activa, solo se actualizan los accesorios; la marcha no se reinicia (ver Reglas de comportamiento).
 
 ---
 
 ## Formato de motion_status
 
 ```
-[cmd_id, state, L_dir, L_pwm, R_dir, R_pwm, remaining_ms]
+[cmd_id, estado, rpm_izq, rpm_der, feedback]
 ```
 
 | Campo | Índice | Descripción |
 |---|---|---|
 | `cmd_id` | 0 | ID del comando al que responde |
-| `state` | 1 | Estado actual (ver tabla abajo) |
-| `L_dir` | 2 | Dirección motor izquierdo activo |
-| `L_pwm` | 3 | Potencia motor izquierdo activo |
-| `R_dir` | 4 | Dirección motor derecho activo |
-| `R_pwm` | 5 | Potencia motor derecho activo |
-| `remaining_ms` | 6 | Tiempo restante en ms (0 si es continuo o idle) |
+| `estado` | 1 | Estado actual (ver tabla abajo) |
+| `rpm_izq` | 2 | RPM medida rueda izquierda (con signo: + adelante, − atrás) |
+| `rpm_der` | 3 | RPM medida rueda derecha (con signo) |
+| `feedback` | 4 | En recta: `error_rumbo` (cuentas izq−der). En giro: grados completados. |
 
 ### Estados del motor
 
 | Valor | Nombre | Descripción |
 |---|---|---|
 | `0` | `IDLE` | Sin comando activo. Heartbeat cada 1 segundo. |
-| `1` | `ACCEPTED` | Comando recibido y validado. |
+| `1` | `ACCEPTED` | Comando recibido y validado (ACK inmediato). |
 | `2` | `EXECUTING` | Comando en ejecución. Status cada 200 ms. |
-| `3` | `DONE` | Comando finalizado (tiempo cumplido o stop recibido). |
-| `4` | `ABORTED` | Comando anterior interrumpido por un stop. |
-| `5` | `ERROR` | Comando inválido o motor ocupado. |
+| `3` | `DONE` | Giro completado (ambas ruedas en tolerancia) o comando finalizado. |
+| `5` | `ERROR` | Comando inválido (modo o flags fuera de rango). |
 
 ---
 
@@ -172,8 +192,15 @@ El nodo `esp32_motor_node` se comunica con el Brain mediante dos topics ROS 2:
 | 5 | MC33926 — M1 IN2 (motor izquierdo) |
 | 6 | MC33926 — M2 IN1 (motor derecho) |
 | 7 | MC33926 — M2 IN2 (motor derecho) |
+| 8 | Encoder izquierdo — canal A (PCNT) |
+| 9 | Encoder izquierdo — canal B (PCNT) |
+| 10 | Encoder derecho — canal A (PCNT) |
+| 11 | Encoder derecho — canal B (PCNT) |
 | 17 | Sabertooth TX (bordeadora, UART2, 9600 baud) |
 | 18 | AMC CBE12A1C INHIBIT̄ (cortadora central, P1-9) |
+| 43/44 | UART0 (micro-ROS + consola) |
+
+> **Encoder derecho invertido:** verificado en banco, el encoder derecho cuenta al revés respecto al sentido del motor. Se compensa en firmware con `ENC_R_SIGN = -1` (izquierdo `+1`). Pull-up interno activado en los 4 pines (encoders push-pull).
 
 ---
 
@@ -193,77 +220,80 @@ ros2 topic echo /motion_status
 
 ---
 
-### Solo accesorios (motores parados)
+### Solo accesorios (motores parados → modo STOP)
 
 **Encender cortadora central, bordeadora apagada:**
 ```bash
-ros2 topic pub --once /motion_cmd std_msgs/msg/Int32MultiArray "{data: [1, 0, 0, 0, 0, 0, 0, 1]}"
+ros2 topic pub --once /motion_cmd std_msgs/msg/Int32MultiArray "{data: [1, 0, 0, 0, 1]}"
 ```
 
 **Encender bordeadora, cortadora apagada:**
 ```bash
-ros2 topic pub --once /motion_cmd std_msgs/msg/Int32MultiArray "{data: [2, 0, 0, 0, 0, 0, 1, 0]}"
+ros2 topic pub --once /motion_cmd std_msgs/msg/Int32MultiArray "{data: [2, 0, 0, 1, 0]}"
 ```
 
 **Encender ambos accesorios, motores parados:**
 ```bash
-ros2 topic pub --once /motion_cmd std_msgs/msg/Int32MultiArray "{data: [3, 0, 0, 0, 0, 0, 1, 1]}"
+ros2 topic pub --once /motion_cmd std_msgs/msg/Int32MultiArray "{data: [3, 0, 0, 1, 1]}"
 ```
 
 **Apagar todo:**
 ```bash
-ros2 topic pub --once /motion_cmd std_msgs/msg/Int32MultiArray "{data: [4, 0, 0, 0, 0, 0, 0, 0]}"
+ros2 topic pub --once /motion_cmd std_msgs/msg/Int32MultiArray "{data: [4, 0, 0, 0, 0]}"
 ```
 
 ---
 
-### Movimiento temporizado
+### Movimiento por velocidad (continuo hasta nuevo comando)
 
-**Adelante 3 segundos, PWM=80, sin accesorios:**
+**Adelante a 10 RPM, sin accesorios:**
 ```bash
-ros2 topic pub --once /motion_cmd std_msgs/msg/Int32MultiArray "{data: [5, 1, 80, 1, 80, 3000, 0, 0]}"
+ros2 topic pub --once /motion_cmd std_msgs/msg/Int32MultiArray "{data: [5, 1, 10, 0, 0]}"
 ```
 
-**Atrás 5 segundos, PWM=80, bordeadora encendida:**
+**Atrás a 10 RPM, bordeadora encendida:**
 ```bash
-ros2 topic pub --once /motion_cmd std_msgs/msg/Int32MultiArray "{data: [6, 0, 80, 0, 80, 5000, 1, 0]}"
+ros2 topic pub --once /motion_cmd std_msgs/msg/Int32MultiArray "{data: [6, 2, 10, 1, 0]}"
 ```
 
-**Adelante 5 segundos, ambos accesorios encendidos:**
+**Adelante a 20 RPM, ambos accesorios encendidos:**
 ```bash
-ros2 topic pub --once /motion_cmd std_msgs/msg/Int32MultiArray "{data: [7, 1, 80, 1, 80, 5000, 1, 1]}"
-```
-
-**Giro izquierda 3 segundos (M. izq. reversa, M. der. adelante):**
-```bash
-ros2 topic pub --once /motion_cmd std_msgs/msg/Int32MultiArray "{data: [8, 0, 80, 1, 80, 3000, 0, 0]}"
-```
-
-**Giro derecha 3 segundos (M. izq. adelante, M. der. reversa):**
-```bash
-ros2 topic pub --once /motion_cmd std_msgs/msg/Int32MultiArray "{data: [9, 1, 80, 0, 80, 3000, 0, 0]}"
+ros2 topic pub --once /motion_cmd std_msgs/msg/Int32MultiArray "{data: [7, 1, 20, 1, 1]}"
 ```
 
 ---
 
-### Movimiento continuo (T_ms = 0)
+### Giro por ángulo (control de posición)
 
-**Adelante continuo, cortadora encendida:**
+**Girar 90° a la izquierda:**
 ```bash
-ros2 topic pub --once /motion_cmd std_msgs/msg/Int32MultiArray "{data: [10, 1, 80, 1, 80, 0, 0, 1]}"
+ros2 topic pub --once /motion_cmd std_msgs/msg/Int32MultiArray "{data: [8, 3, 90, 0, 0]}"
 ```
 
-**Stop (detiene motores y aplica estado de accesorios):**
+**Girar 90° a la derecha:**
 ```bash
-ros2 topic pub --once /motion_cmd std_msgs/msg/Int32MultiArray "{data: [11, 0, 0, 0, 0, 0, 0, 0]}"
+ros2 topic pub --once /motion_cmd std_msgs/msg/Int32MultiArray "{data: [9, 4, 90, 0, 0]}"
+```
+
+El motor publica `estado=3` (DONE) cuando completa el ángulo y vuelve a `IDLE`.
+
+---
+
+### Stop
+
+```bash
+ros2 topic pub --once /motion_cmd std_msgs/msg/Int32MultiArray "{data: [10, 0, 0, 0, 0]}"
 ```
 
 ---
 
 ## Reglas de comportamiento
 
-- El motor **no acepta un nuevo comando de movimiento** mientras está ejecutando uno. Responde con `STATE_ERROR`. Para interrumpir, enviar primero un stop (`L_pwm=0, R_pwm=0`).
-- Los **accesorios se aplican siempre** al recibir cualquier comando, incluyendo stop.
-- El **cmd_id** debe ser distinto por cada comando para que el Brain pueda correlacionar el feedback. No es obligatorio que sea secuencial, pero sí único por operación.
-- La **bordeadora** usa una rampa de soft-start para evitar el cogging del motor brushless de la bordeadora. El apagado es inmediato.
-- La **cortadora central** se habilita/inhibe directamente por GPIO (sin rampa). El driver AMC CBE12A1C maneja internamente el arranque del BLDC.
+- El motor está **siempre atento**: un comando nuevo **reemplaza** al que esté en ejecución de inmediato, sin importar el modo (ya no rechaza comandos por estar ocupado).
+- **Orden idéntica = no reinicia la marcha:** si la nueva orden tiene el **mismo `modo` y `param`** que la que ya se está ejecutando, el firmware **solo actualiza los accesorios** (bordeadora/cortadora) y NO reinicia el lazo de control. Así se puede prender/apagar una herramienta mientras el robot avanza, sin el "hipo" de re-arranque. Verificado en banco con cortadora y bordeadora.
+- Los **movimientos son continuos** (sin `T_ms`): se mantienen hasta recibir otro comando. El flujo de tiempos lo maneja el Brain.
+- Los **giros** terminan solos al alcanzar el ángulo (publican `DONE` y vuelven a `IDLE`).
+- Los **accesorios se aplican siempre** al recibir cualquier comando, incluyendo STOP.
+- El **cmd_id** debe ser único por operación para que el Brain pueda correlacionar el feedback.
+- La **bordeadora** usa rampa de soft-start (kick-start anti-cogging); el apagado es inmediato.
+- La **cortadora central** se habilita/inhibe directamente por GPIO (sin rampa); el driver AMC CBE12A1C maneja internamente el arranque del BLDC.

@@ -41,74 +41,88 @@ ros2 topic list
 
 ---
 
-## 4. Protocolo de Comandos al Motor
+## 4. Protocolo de Comandos al Motor (v3.0 — control local)
 
 Formato de `motion_cmd`:
 ```
-[cmd_id, L_dir, L_pwm, R_dir, R_pwm, T_ms, bordeadora_on, cortadora_on]
+[cmd_id, modo, param, bordeadora_on, cortadora_on]
 ```
 
 | Campo | Índice | Valores | Descripción |
 |---|---|---|---|
 | `cmd_id` | 0 | Entero ≥ 0 | ID único del comando |
-| `L_dir` | 1 | `0`=reversa, `1`=adelante | Dirección motor izquierdo |
-| `L_pwm` | 2 | 0–255 | Potencia motor izquierdo |
-| `R_dir` | 3 | `0`=reversa, `1`=adelante | Dirección motor derecho |
-| `R_pwm` | 4 | 0–255 | Potencia motor derecho |
-| `T_ms` | 5 | `0`=continuo, `>0`=ms | Duración |
-| `bordeadora_on` | 6 | `0`/`1` | Sabertooth (rampa soft-start) |
-| `cortadora_on` | 7 | `0`/`1` | AMC CBE12A1C via GPIO 18 |
+| `modo` | 1 | `0`–`5` | Modo de movimiento (ver tabla) |
+| `param` | 2 | según modo | RPM (ADELANTE/ATRAS) o grados (GIRO_IZQ/GIRO_DER) |
+| `bordeadora_on` | 3 | `0`/`1` | Sabertooth (rampa soft-start) |
+| `cortadora_on` | 4 | `0`/`1` | AMC CBE12A1C via GPIO 18 |
+
+| modo | Nombre | param | |
+|---|---|---|---|
+| `0` | STOP | (ignorado) | Detiene la tracción |
+| `1` | ADELANTE | RPM | Control por velocidad + rumbo |
+| `2` | ATRAS | RPM | Control por velocidad + rumbo |
+| `3` | GIRO_IZQ | grados | Giro pivot por ángulo |
+| `4` | GIRO_DER | grados | Giro pivot por ángulo |
+| `5` | PIVOT | (a definir) | Placeholder (hace STOP) |
+
+`motion_status` = `[cmd_id, estado, rpm_izq, rpm_der, feedback]`.
+Estados: `0=IDLE, 1=ACCEPTED, 2=EXECUTING, 3=DONE, 5=ERROR`.
+`feedback`: en recta = error de rumbo (cuentas); en giro = grados completados.
+
+> Sin `T_ms`: los movimientos son continuos hasta el próximo comando. El motor está **siempre atento** (un comando nuevo reemplaza al activo).
 
 ---
 
-## 5. Comandos de Prueba — Solo Accesorios (Motores Parados)
+## 5. Comandos de Prueba — Solo Accesorios (modo STOP)
 
 ```bash
 # Encender solo la cortadora central
-ros2 topic pub --once /motion_cmd std_msgs/msg/Int32MultiArray "{data: [1, 0, 0, 0, 0, 0, 0, 1]}"
+ros2 topic pub --once /motion_cmd std_msgs/msg/Int32MultiArray "{data: [1, 0, 0, 0, 1]}"
 
 # Encender solo la bordeadora
-ros2 topic pub --once /motion_cmd std_msgs/msg/Int32MultiArray "{data: [2, 0, 0, 0, 0, 0, 1, 0]}"
+ros2 topic pub --once /motion_cmd std_msgs/msg/Int32MultiArray "{data: [2, 0, 0, 1, 0]}"
 
 # Encender ambos accesorios
-ros2 topic pub --once /motion_cmd std_msgs/msg/Int32MultiArray "{data: [3, 0, 0, 0, 0, 0, 1, 1]}"
+ros2 topic pub --once /motion_cmd std_msgs/msg/Int32MultiArray "{data: [3, 0, 0, 1, 1]}"
 
 # Apagar todo
-ros2 topic pub --once /motion_cmd std_msgs/msg/Int32MultiArray "{data: [4, 0, 0, 0, 0, 0, 0, 0]}"
+ros2 topic pub --once /motion_cmd std_msgs/msg/Int32MultiArray "{data: [4, 0, 0, 0, 0]}"
 ```
 
 ---
 
-## 6. Comandos de Prueba — Movimiento Temporizado
+## 6. Comandos de Prueba — Movimiento por Velocidad
 
 ```bash
-# Adelante 3 segundos, PWM=80, sin accesorios
-ros2 topic pub --once /motion_cmd std_msgs/msg/Int32MultiArray "{data: [5, 1, 80, 1, 80, 3000, 0, 0]}"
+# Adelante a 10 RPM, sin accesorios
+ros2 topic pub --once /motion_cmd std_msgs/msg/Int32MultiArray "{data: [5, 1, 10, 0, 0]}"
 
-# Atrás 5 segundos, PWM=80, bordeadora encendida
-ros2 topic pub --once /motion_cmd std_msgs/msg/Int32MultiArray "{data: [6, 0, 80, 0, 80, 5000, 1, 0]}"
+# Atrás a 10 RPM, bordeadora encendida
+ros2 topic pub --once /motion_cmd std_msgs/msg/Int32MultiArray "{data: [6, 2, 10, 1, 0]}"
 
-# Izquierda 5 segundos, PWM=80, bordeadora encendida
-ros2 topic pub --once /motion_cmd std_msgs/msg/Int32MultiArray "{data: [7, 0, 80, 1, 80, 5000, 1, 0]}"
+# Adelante a 20 RPM, ambos accesorios encendidos
+ros2 topic pub --once /motion_cmd std_msgs/msg/Int32MultiArray "{data: [7, 1, 20, 1, 1]}"
 
-# Derecha 10 segundos, PWM=80, sin accesorios
-ros2 topic pub --once /motion_cmd std_msgs/msg/Int32MultiArray "{data: [8, 1, 80, 0, 80, 10000, 0, 0]}"
-
-# Adelante 5 segundos, ambos accesorios encendidos
-ros2 topic pub --once /motion_cmd std_msgs/msg/Int32MultiArray "{data: [9, 1, 80, 1, 80, 5000, 1, 1]}"
+# Stop
+ros2 topic pub --once /motion_cmd std_msgs/msg/Int32MultiArray "{data: [8, 0, 0, 0, 0]}"
 ```
 
 ---
 
-## 7. Comandos de Prueba — Movimiento Continuo
+## 7. Comandos de Prueba — Giro por Ángulo
 
 ```bash
-# Adelante continuo, cortadora encendida
-ros2 topic pub --once /motion_cmd std_msgs/msg/Int32MultiArray "{data: [10, 1, 80, 1, 80, 0, 0, 1]}"
+# Girar 90° a la izquierda
+ros2 topic pub --once /motion_cmd std_msgs/msg/Int32MultiArray "{data: [9, 3, 90, 0, 0]}"
 
-# Stop (detiene motores, aplica estado de accesorios del mensaje)
-ros2 topic pub --once /motion_cmd std_msgs/msg/Int32MultiArray "{data: [11, 0, 0, 0, 0, 0, 0, 0]}"
+# Girar 90° a la derecha
+ros2 topic pub --once /motion_cmd std_msgs/msg/Int32MultiArray "{data: [10, 4, 90, 0, 0]}"
+
+# Girar 45° a la derecha
+ros2 topic pub --once /motion_cmd std_msgs/msg/Int32MultiArray "{data: [11, 4, 45, 0, 0]}"
 ```
+
+> El motor publica `estado=3` (DONE) al completar el ángulo y vuelve a `IDLE`.
 
 ---
 
