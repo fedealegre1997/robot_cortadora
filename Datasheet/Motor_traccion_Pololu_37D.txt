@@ -1,0 +1,50 @@
+REFERENCIA TÉCNICA DEL MOTOR DE TRACCIÓN POLOLU 37Dx57L 100:1 12V
+
+Motor de tracción del robot (2 unidades, una por rueda). Motorreductor DC con escobillas de la línea 37D de Pololu, versión SIN encoder.
+
+Fuente: página oficial del producto, Pololu ítem #4745 "100:1 Metal Gearmotor 37Dx57L mm 12V (Helical Pinion)"
+https://www.pololu.com/product/4745
+(Reemplaza al ítem #1106, versión con piñón recto, discontinuado y funcionalmente idéntico.)
+Consultado el 28/10/2026.
+
+Datos principales:
+
+- Modelo: Pololu 100:1 Metal Gearmotor 37Dx57L mm 12V (piñón helicoidal)
+- Tipo: Motor DC con escobillas + reductora metálica
+- Voltaje nominal: 12 V
+- Reducción exacta: (25×30×28×28×30)/(10×10×12×12×12) ≈ 102,083:1
+- Velocidad sin carga: 100 rpm (a 12 V)
+- Corriente sin carga: 0,2 A (la hoja de datos de 2019 indica 0,15 A)
+- Corriente de bloqueo (extrapolada): 5,5 A
+- Torque de bloqueo (extrapolado): 34 kg·cm (470 oz·in)
+- Carga continua máxima recomendada: 10 kg·cm (150 oz·in)
+- Torque instantáneo máximo: 25 kg·cm (350 oz·in)
+- Potencia de salida máxima: 8 W (a la carga continua recomendada)
+- Eje de salida: 6 mm de diámetro, 16 mm de largo, con forma de D
+- Largo de la caja: 57 mm
+- Encoder: NO tiene. La página no menciona eje trasero extendido.
+
+Versión equivalente CON encoder:
+
+- Pololu ítem #4755 "100:1 Metal Gearmotor 37Dx73L mm 12V with 64 CPR Encoder (Helical Pinion)"
+- https://www.pololu.com/product/4755
+- Misma reductora y misma brida; el motor es 16 mm más largo (73 mm) por el encoder.
+- Encoder de cuadratura de 64 cuentas por vuelta del eje del motor (contando ambos flancos de ambos canales).
+- Cuentas por vuelta del eje de salida: 64 × 102,083 ≈ 6533.
+- En el firmware del motor v3.2 equivale a: CPR_MOTOR = 16, QUAD_X4 = 4, GEAR = 102.083 (antes 90).
+- DESCARTADA por el equipo el 28/10/2026: no se consigue. El robot usa la versión sin encoder.
+
+Compatibilidad con el driver Dual MC33926:
+
+- MC33926: 5–28 V de entrada, ~3 A continuos y 5 A pico por canal.
+- Corriente de bloqueo del motor (5,5 A a 12 V) > pico del driver (5 A): en un trabón, el driver queda por debajo de la corriente de bloqueo.
+- Recomendación general de Pololu para motores DC con escobillas: operar a ≤25 % de la corriente de bloqueo (≈1,4 A) → dentro del rango continuo del MC33926.
+
+Velocidad lineal teórica con la rueda actual (R = 0,075 m):
+
+v = (100 / 60) × 2π × 0,075 ≈ 0,79 m/s sin carga a 12 V.
+
+Observaciones:
+
+- El firmware del motor v3.0–v3.2 depende de los encoders para todo el control (velocidad, rumbo, ángulo y distancias del PIVOT). Con esta versión sin encoder no funciona tal como está.
+- Voltaje de alimentación real del motor en el robot: pendiente de confirmar (depende del árbol de alimentación de las baterías LiPo 4S).

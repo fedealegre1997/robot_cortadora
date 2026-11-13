@@ -1,0 +1,41 @@
+REFERENCIA TÉCNICA DEL IMU LSM9DS1 (SPARKFUN LSM9DS1 BREAKOUT)
+
+IMU de 9 grados de libertad (acelerómetro, giróscopo y magnetómetro, 3 ejes cada uno). Es el IMU de 9 ejes que el proyecto buscaba para tener un yaw absoluto (con magnetómetro). Convive con el MPU-6500 (6 ejes), que es el que hoy está integrado en el ESP32 sensor.
+
+Placa identificada por fotos del equipo (28/10/2026): SparkFun "LSM9DS1 Breakout" (placa roja, logo SparkFun).
+
+Alimentación (serigrafía de la placa):
+
+- VDD: 1,9 – 3,6 V  ← impreso en la cara posterior: "LSM9DS1 Breakout 1.9-3.6V"
+- La placa NO tiene regulador de tensión ni conversor de nivel lógico (en el frente solo están el chip, resistencias y jumpers).
+- ⛔ NO alimentar desde la línea de 5 V del LM2596: está por encima del rango de la placa y el chip se daña.
+- ✅ Alimentar desde el pin 3V3 del ESP32 motor (decidido 28/10/2026: el LSM9DS1 va en el ESP32 motor, en un bus I2C propio; el MPU-6500 se queda en el ESP32 sensor, así que no comparten bus).
+
+Niveles de I2C:
+
+- Los pull-ups de SDA/SCL de la placa (jumper "I2C PU" en la cara posterior) van a VDD.
+- Con VDD = 3,3 V, SDA/SCL trabajan a 3,3 V → compatibles directamente con el ESP32 clásico y con el ESP32-S3, sin conversor de nivel.
+
+Pines:
+
+- Lado de alimentación/I2C: GND, VDD, SDA, SCL.
+- Lado de control: DEN, INT2, INT1, INTM, RDY, CS M, CS AG, SDO M, SDO AG.
+- Para I2C solo hacen falta GND, VDD, SDA y SCL.
+
+Direcciones I2C (tabla impresa en la cara posterior, según el estado de los jumpers SDO):
+
+| SDO | Magnetómetro (M) | Acel./Giro (AG) |
+|-----|------------------|-----------------|
+|  0  | 0x1C             | 0x6A            |
+|  1  | 0x1E             | 0x6B            |
+
+- No se pudo confirmar por foto el estado de los jumpers SDO. Hay que confirmarlo con un escaneo I2C al conectarla.
+
+Convivencia con el MPU-6500 en el mismo bus I2C:
+
+- El MPU-6500 está en 0x69 (MPU_ADDR en el firmware del sensor v6.2).
+- El LSM9DS1 usa 0x6A/0x6B (AG) y 0x1C/0x1E (M) → no hay conflicto de direcciones; pueden compartir SDA/SCL.
+- Bus actual del ESP32 sensor: SDA GPIO 21, SCL GPIO 23, 100 kHz, pull-ups internos habilitados.
+
+Estado: disponible, sin integrar en firmware.
+- Confirmado el 02/11/26 por escaneo I2C (firmware test_lsm9ds1): AG en 0x6B y M en 0x1E → jumpers SDO en 1 (WHO_AM_I 0x68 / 0x3D OK).

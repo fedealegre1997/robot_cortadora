@@ -1,0 +1,2 @@
+# Placa de prueba: ESP32-S3-WROOM-1 N16R8 (16 MB de flash)
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y

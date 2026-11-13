@@ -1,0 +1,118 @@
+==> PARADA 3:  YAW GIRO =    +2.2  |  YAW MAG =    +2.2  |  diferencia =  -0.0  |  Bh = 23.5 uT
+[ 241 s]  YAW GIRO =    +2.2  |  YAW MAG =    +2.1  |  diferencia =  +0.1  |  Bh = 23.6 uT
+[ 242 s]  YAW GIRO =    -1.8  |  YAW MAG =    +1.2  |  diferencia =  -3.0  |  Bh = 23.6 uT
+[ 243 s]  YAW GIRO =    +1.0  |  YAW MAG =    +2.0  |  diferencia =  -1.0  |  Bh = 23.3 uT
+
+>>> CALIBRACION DEL MAGNETOMETRO: girar la placa 1 vuelta completa (360 grados),
+    despacio y apoyada en la mesa, durante los proximos 20 s
+     1 s | vuelta medida por el giroscopo:   +0.1 grados
+     2 s | vuelta medida por el giroscopo:  +20.5 grados
+     3 s | vuelta medida por el giroscopo:  +52.3 grados
+     4 s | vuelta medida por el giroscopo:  +85.0 grados
+     5 s | vuelta medida por el giroscopo: +112.5 grados
+     6 s | vuelta medida por el giroscopo: +146.9 grados
+     7 s | vuelta medida por el giroscopo: +170.0 grados
+     8 s | vuelta medida por el giroscopo: +196.8 grados
+     9 s | vuelta medida por el giroscopo: +219.1 grados
+    10 s | vuelta medida por el giroscopo: +238.3 grados
+    11 s | vuelta medida por el giroscopo: +276.0 grados
+    12 s | vuelta medida por el giroscopo: +332.4 grados
+    13 s | vuelta medida por el giroscopo: +354.6 grados
+    14 s | vuelta medida por el giroscopo: +359.8 grados
+    15 s | vuelta medida por el giroscopo: +359.8 grados
+    16 s | vuelta medida por el giroscopo: +359.9 grados
+    17 s | vuelta medida por el giroscopo: +359.8 grados
+    18 s | vuelta medida por el giroscopo: +359.7 grados
+    19 s | vuelta medida por el giroscopo: +359.7 grados
+  Vuelta medida: +359.6 grados | radios X/Y: 14.3 / 15.1 uT
+  Ajuste de elipse (409 muestras): centro +34.1 / -6.8 uT | semiejes 16.1 / 11.9 uT (relacion 1.35, eje mayor a +130 grados)
+  OK: campo horizontal 13.8 uT | dispersion tras calibrar 3.2 % (bueno < 3 %)
+  Desde ahora cada segundo: YAW GIRO y YAW MAG (grados girados desde la referencia segun cada sensor), su diferencia y Bh (campo calibrado: tiene que quedar casi constante)
+
+Dejar la placa QUIETA en la posicion inicial para tomar la referencia...
+[ 244 s] G(dps) x=-0.033 y=+0.147 z=-0.030 | A(g) x=-0.040 y=-0.008 z=+0.970 |A|=0.971 | M(uT) x= +47.5 y= -13.4 z=  +8.8 |B|= 50.1 | T=25.6C | yaw=-832.156
+==> REFERENCIA: YAW GIRO = 0 y YAW MAG = 0 en esta posicion (grados, positivo = antihorario). Girar la placa y dejarla quieta en cada posicion
+[ 245 s]  YAW GIRO =    -0.0  |  YAW MAG =    -1.0  |  diferencia =  +1.0  |  Bh = 14.3 uT
+[ 246 s]  YAW GIRO =    -0.0  |  YAW MAG =    -0.9  |  diferencia =  +0.9  |  Bh = 13.7 uT
+[ 247 s]  YAW GIRO =    -0.2  |  YAW MAG =    +0.7  |  diferencia =  -0.9  |  Bh = 13.6 uT
+[ 248 s]  YAW GIRO =   -12.0  |  YAW MAG =    -9.9  |  diferencia =  -2.1  |  Bh = 13.6 uT
+[ 249 s]  YAW GIRO =   -31.8  |  YAW MAG =   -26.1  |  diferencia =  -5.7  |  Bh = 15.1 uT
+[ 250 s]  YAW GIRO =   -79.3  |  YAW MAG =   -52.6  |  diferencia = -26.6  |  Bh = 17.8 uT
+[ 251 s]  YAW GIRO =   -90.1  |  YAW MAG =   -58.5  |  diferencia = -31.6  |  Bh = 19.6 uT
+[ 252 s]  YAW GIRO =   -90.2  |  YAW MAG =   -56.8  |  diferencia = -33.4  |  Bh = 19.6 uT
+==> PARADA 1:  YAW GIRO =   -90.2  |  YAW MAG =   -55.8  |  diferencia = -34.5  |  Bh = 19.3 uT
+[ 253 s]  YAW GIRO =   -90.2  |  YAW MAG =   -55.6  |  diferencia = -34.7  |  Bh = 19.9 uT
+[ 254 s]  YAW GIRO =   -90.2  |  YAW MAG =   -53.9  |  diferencia = -36.3  |  Bh = 19.6 uT
+[ 255 s]  YAW GIRO =   -62.9  |  YAW MAG =   -47.4  |  diferencia = -15.4  |  Bh = 17.8 uT
+[ 256 s]  YAW GIRO =   -13.6  |  YAW MAG =   -13.2  |  diferencia =  -0.4  |  Bh = 15.0 uT
+[ 257 s]  YAW GIRO =    -0.6  |  YAW MAG =    -1.6  |  diferencia =  +1.0  |  Bh = 13.9 uT
+[ 258 s]  YAW GIRO =    -0.5  |  YAW MAG =    +0.3  |  diferencia =  -0.8  |  Bh = 14.7 uT
+==> PARADA 2:  YAW GIRO =    -0.5  |  YAW MAG =    -0.1  |  diferencia =  -0.4  |  Bh = 14.7 uT
+[ 259 s]  YAW GIRO =    -0.5  |  YAW MAG =    +1.3  |  diferencia =  -1.7  |  Bh = 14.5 uT
+[ 260 s]  YAW GIRO =   +13.6  |  YAW MAG =   +10.1  |  diferencia =  +3.5  |  Bh = 13.9 uT
+[ 261 s]  YAW GIRO =   +51.9  |  YAW MAG =   +55.1  |  diferencia =  -3.2  |  Bh = 14.0 uT
+[ 262 s]  YAW GIRO =   +73.2  |  YAW MAG =   +84.2  |  diferencia = -11.1  |  Bh = 17.5 uT
+[ 263 s]  YAW GIRO =   +89.1  |  YAW MAG =  +103.6  |  diferencia = -14.5  |  Bh = 21.7 uT
+[ 264 s]  YAW GIRO =   +89.1  |  YAW MAG =  +105.9  |  diferencia = -16.8  |  Bh = 21.4 uT
+==> PARADA 3:  YAW GIRO =   +89.1  |  YAW MAG =  +105.4  |  diferencia = -16.4  |  Bh = 21.6 uT
+[ 265 s]  YAW GIRO =   +89.1  |  YAW MAG =  +104.5  |  diferencia = -15.4  |  Bh = 21.6 uT
+[ 266 s]  YAW GIRO =   +81.3  |  YAW MAG =   +95.0  |  diferencia = -13.6  |  Bh = 19.2 uT
+[ 267 s]  YAW GIRO =   +46.9  |  YAW MAG =   +46.8  |  diferencia =  +0.1  |  Bh = 14.5 uT
+[ 268 s]  YAW GIRO =   +15.6  |  YAW MAG =   +12.9  |  diferencia =  +2.7  |  Bh = 15.0 uT
+[ 269 s]  YAW GIRO =    -0.4  |  YAW MAG =    -1.5  |  diferencia =  +1.0  |  Bh = 16.6 uT
+[ 270 s]  YAW GIRO =    -0.4  |  YAW MAG =    -3.3  |  diferencia =  +3.0  |  Bh = 16.6 uT
+==> PARADA 4:  YAW GIRO =    -0.4  |  YAW MAG =    -0.7  |  diferencia =  +0.3  |  Bh = 15.8 uT
+
+>>> NUEVA REFERENCIA: dejar la placa QUIETA...
+==> REFERENCIA: YAW GIRO = 0 y YAW MAG = 0 en esta posicion (grados, positivo = antihorario). Girar la placa y dejarla quieta en cada posicion
+[ 271 s]  YAW GIRO =    +0.1  |  YAW MAG =    -0.8  |  diferencia =  +0.8  |  Bh = 16.8 uT
+[ 272 s]  YAW GIRO =    +0.1  |  YAW MAG =    -0.5  |  diferencia =  +0.6  |  Bh = 16.3 uT
+[ 273 s]  YAW GIRO =    +0.2  |  YAW MAG =    -1.0  |  diferencia =  +1.3  |  Bh = 15.7 uT
+[ 274 s]  YAW GIRO =   +23.5  |  YAW MAG =   +16.5  |  diferencia =  +7.0  |  Bh = 15.2 uT
+[ 275 s]  YAW GIRO =   +46.7  |  YAW MAG =   +44.6  |  diferencia =  +2.1  |  Bh = 15.6 uT
+[ 276 s]  YAW GIRO =   +81.1  |  YAW MAG =   +91.0  |  diferencia =  -9.9  |  Bh = 19.7 uT
+[ 277 s]  YAW GIRO =   +89.8  |  YAW MAG =  +104.8  |  diferencia = -15.0  |  Bh = 22.6 uT
+[ 278 s]  YAW GIRO =   +89.8  |  YAW MAG =  +105.5  |  diferencia = -15.7  |  Bh = 23.1 uT
+==> PARADA 1:  YAW GIRO =   +89.8  |  YAW MAG =  +105.5  |  diferencia = -15.7  |  Bh = 23.1 uT
+[ 279 s]  YAW GIRO =   +89.8  |  YAW MAG =  +104.1  |  diferencia = -14.2  |  Bh = 22.7 uT
+[ 280 s]  YAW GIRO =   +73.6  |  YAW MAG =   +87.1  |  diferencia = -13.5  |  Bh = 19.2 uT
+[ 281 s]  YAW GIRO =   +41.7  |  YAW MAG =   +47.0  |  diferencia =  -5.3  |  Bh = 15.6 uT
+[ 282 s]  YAW GIRO =    +0.3  |  YAW MAG =    +0.5  |  diferencia =  -0.3  |  Bh = 15.4 uT
+[ 283 s]  YAW GIRO =   -29.7  |  YAW MAG =   -23.3  |  diferencia =  -6.4  |  Bh = 16.7 uT
+[ 284 s]  YAW GIRO =   -89.5  |  YAW MAG =   -64.0  |  diferencia = -25.5  |  Bh = 22.3 uT
+[ 285 s]  YAW GIRO =   -89.5  |  YAW MAG =   -62.6  |  diferencia = -26.9  |  Bh = 22.4 uT
+==> PARADA 2:  YAW GIRO =   -89.5  |  YAW MAG =   -62.8  |  diferencia = -26.7  |  Bh = 21.8 uT
+[ 286 s]  YAW GIRO =   -89.5  |  YAW MAG =   -60.9  |  diferencia = -28.6  |  Bh = 22.9 uT
+[ 287 s]  YAW GIRO =   -89.5  |  YAW MAG =   -62.8  |  diferencia = -26.7  |  Bh = 21.9 uT
+[ 288 s]  YAW GIRO =   -89.5  |  YAW MAG =   -64.2  |  diferencia = -25.4  |  Bh = 21.6 uT
+[ 289 s]  YAW GIRO =   -43.3  |  YAW MAG =   -41.1  |  diferencia =  -2.1  |  Bh = 19.5 uT
+[ 290 s]  YAW GIRO =    -5.7  |  YAW MAG =    -7.9  |  diferencia =  +2.2  |  Bh = 19.4 uT
+[ 291 s]  YAW GIRO =    +0.3  |  YAW MAG =    -4.8  |  diferencia =  +5.0  |  Bh = 18.2 uT
+==> PARADA 3:  YAW GIRO =    +0.3  |  YAW MAG =    -5.3  |  diferencia =  +5.6  |  Bh = 17.8 uT
+[ 292 s]  YAW GIRO =    +0.3  |  YAW MAG =    -5.5  |  diferencia =  +5.8  |  Bh = 18.0 uT
+[ 293 s]  YAW GIRO =    +0.3  |  YAW MAG =    -3.4  |  diferencia =  +3.7  |  Bh = 17.5 uT
+[ 294 s]  YAW GIRO =    +0.3  |  YAW MAG =    -3.8  |  diferencia =  +4.1  |  Bh = 17.6 uT
+[ 295 s]  YAW GIRO =    +0.4  |  YAW MAG =    -5.6  |  diferencia =  +6.0  |  Bh = 17.8 uT
+[ 296 s]  YAW GIRO =    +0.4  |  YAW MAG =    -4.0  |  diferencia =  +4.5  |  Bh = 17.2 uT
+[ 297 s]  YAW GIRO =    +0.5  |  YAW MAG =    -5.1  |  diferencia =  +5.6  |  Bh = 17.8 uT
+[ 298 s]  YAW GIRO =    +0.5  |  YAW MAG =    -5.5  |  diferencia =  +6.1  |  Bh = 17.7 uT
+[ 299 s]  YAW GIRO =    +0.6  |  YAW MAG =    -5.6  |  diferencia =  +6.2  |  Bh = 18.5 uT
+[ 300 s]  YAW GIRO =    +0.6  |  YAW MAG =    -3.7  |  diferencia =  +4.3  |  Bh = 17.9 uT
+---- Minuto 5: deriva en el minuto -0.945 deg | yaw total -831.912 deg | |B| min/max 34.9/56.0 uT | errores I2C 1 ----
+[ 301 s]  YAW GIRO =    +0.7  |  YAW MAG =    -3.1  |  diferencia =  +3.8  |  Bh = 17.8 uT
+[ 302 s]  YAW GIRO =    +0.7  |  YAW MAG =    -3.3  |  diferencia =  +4.0  |  Bh = 17.4 uT
+[ 303 s]  YAW GIRO =    +0.7  |  YAW MAG =    -2.4  |  diferencia =  +3.2  |  Bh = 18.0 uT
+[ 304 s]  YAW GIRO =    +0.8  |  YAW MAG =    -2.9  |  diferencia =  +3.7  |  Bh = 17.8 uT
+[ 305 s]  YAW GIRO =    +0.8  |  YAW MAG =    -3.8  |  diferencia =  +4.6  |  Bh = 17.5 uT
+[ 306 s]  YAW GIRO =    +0.8  |  YAW MAG =    -1.7  |  diferencia =  +2.5  |  Bh = 17.5 uT
+[ 307 s]  YAW GIRO =    +0.9  |  YAW MAG =    -3.2  |  diferencia =  +4.1  |  Bh = 18.4 uT
+[ 308 s]  YAW GIRO =    +0.9  |  YAW MAG =    -5.7  |  diferencia =  +6.7  |  Bh = 17.9 uT
+[ 309 s]  YAW GIRO =    +0.9  |  YAW MAG =    -6.2  |  diferencia =  +7.1  |  Bh = 18.4 uT
+[ 310 s]  YAW GIRO =    +1.0  |  YAW MAG =    -5.0  |  diferencia =  +6.0  |  Bh = 18.0 uT
+[ 311 s]  YAW GIRO =    +1.0  |  YAW MAG =    -4.3  |  diferencia =  +5.2  |  Bh = 17.6 uT
+[ 312 s]  YAW GIRO =    +1.0  |  YAW MAG =    -4.4  |  diferencia =  +5.5  |  Bh = 17.7 uT
+[ 313 s]  YAW GIRO =    +1.1  |  YAW MAG =    -4.6  |  diferencia =  +5.6  |  Bh = 17.8 uT
+[ 314 s]  YAW GIRO =    +1.1  |  YAW MAG =    -6.2  |  diferencia =  +7.3  |  Bh = 17.6 uT
+[ 315 s]  YAW GIRO =    +1.1  |  YAW MAG =    -3.3  |  diferencia =  +4.4  |  Bh = 17.8 uT
+[ 316 s]  YAW GIRO =    +1.1  |  YAW MAG =    -5.9  |  diferencia =  +7.0  |  Bh = 18.1 uT
+[ 317 s]  YAW GIRO =    +1.1  |  YAW MAG =    -3.2  |  diferencia =  +4.4  |  Bh = 18.1 uT
