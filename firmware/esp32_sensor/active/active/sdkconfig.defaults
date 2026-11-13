@@ -2,3 +2,8 @@ CONFIG_ESP_MAIN_TASK_STACK_SIZE=3000
 CONFIG_ESP_TASK_WDT=n
 CONFIG_MICRO_ROS_ESP_XRCE_DDS_MIDDLEWARE=y
 CONFIG_MICRO_ROS_ESP_UART_TRANSPORT=y
+# S3: micro-ROS por USB-Serial-JTAG nativo. La consola no debe usar el USB-JTAG
+# para no mezclarse con los datos de micro-ROS. Consola primaria queda en UART0
+# (GPIO 43/44, sin cablear en esta placa -> inofensiva).
+CONFIG_ESP_CONSOLE_UART_DEFAULT=y
+CONFIG_ESP_CONSOLE_SECONDARY_NONE=y

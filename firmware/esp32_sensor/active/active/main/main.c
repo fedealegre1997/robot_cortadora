@@ -1,19 +1,29 @@
-//  Firmware ESP32 — Adquisicion de Sensores con micro-ROS
-//  Placa: ESP32 (clasico, 2MB Flash)
+//  Firmware ESP32-S3 — Adquisicion de Sensores con micro-ROS
+//  Placa: ESP32-S3-WROOM-1 N8R2 (8MB Flash)
 //  Solo publica, no suscribe ningun topic.
 //
 //  Sensores incluidos:
-//      * Finales de Carrera (x3, GPIO 18, 22, 19)
-//      * MPU-6500 — IMU (I2C, GPIO 21 SDA / 23 SCL)
-//      * Ultrasonicos HC-SR04 (x3, TRIG: 25,26,33 — ECHO: 32,27,35)
-//      * GPS FSTR2 (UART2, GPIO 16 RX / 17 TX, 9600 baud)
+//      * Finales de Carrera (x3, GPIO 38, 2, 37)
+//      * MPU-6500 — IMU (I2C, GPIO 6 SDA / 7 SCL, dir 0x69)
+//      * Ultrasonicos HC-SR04 (x3, TRIG: 18,8,17 — ECHO: 16,9,15)
+//      * GPS FSTR2 (UART2, GPIO 35 RX / 36 TX, 9600 baud)
 //
 //  Protocolo de publicacion:
-//      Topic: /sensores | Float32MultiArray | reliable, 50 ms
-//      [bumper_izq, bumper_centro, bumper_der,
-//       ultra_izq, ultra_centro, ultra_der,
-//       roll, pitch, yaw,
-//       gps_lat, gps_lon, gps_alt, gps_fix]
+//      Topic: /sensores | Float32MultiArray | reliable, 50 ms | 24 valores
+//      [bumper_izq, bumper_centro, bumper_der,            //  0-2
+//       ultra_izq, ultra_centro, ultra_der,               //  3-5
+//       roll, pitch, yaw,                                 //  6-8
+//       gps_lat, gps_lon, gps_alt, gps_fix,               //  9-12
+//       gps_sats, gps_hdop,                               // 13-14
+//       app_connected, app_state, app_dir, app_speed,     // 15-18
+//       app_cutter, app_trimmer, app_seq,                 // 19-21
+//       app_cmd_age_ms, app_polygon_id]                   // 22-23
+//
+//      app_state: 0 STOP, 1 MANUAL, 2 AUTO_RUN, 3 AUTO_PAUSE
+//      app_dir:   0 nada, 1 adelante, 2 atras, 3 izq, 4 der
+//      app_speed: 0-100 %
+//      app_cmd_age_ms: -1 = nunca llego comando
+//      Campos app_*: por ahora valores por defecto (Bluetooth pendiente)
 //
 //  Arquitectura de tareas FreeRTOS:
 //      Core 0: ultrasonic_task (~180 ms), gps_task (continua)
@@ -22,8 +32,8 @@
 //
 //  NOTA: No usar printf() en ninguna tarea. La UART0 es exclusiva de micro-ROS.
 //
-//  Version: 6.1
-//  Fecha: 31/05/2026
+//  Version: 7.0 — port a ESP32-S3 N8R2 (pines segun docs/pines.md §1)
+//  Fecha: 13/11/2026
 //  Autor: Angel Alegre
 
 #include <stdio.h>
@@ -66,18 +76,18 @@
 }
 
 // --- Configuración General ---
-#define SENSORES_SIZE       13
+#define SENSORES_SIZE       24
 
-#define PIN_B_L             GPIO_NUM_18
-#define PIN_B_C             GPIO_NUM_22
-#define PIN_B_R             GPIO_NUM_19
+#define PIN_B_L             GPIO_NUM_38
+#define PIN_B_C             GPIO_NUM_2
+#define PIN_B_R             GPIO_NUM_37
 
-#define TRIG_IZQ            GPIO_NUM_25
-#define ECHO_IZQ            GPIO_NUM_32
-#define TRIG_CEN            GPIO_NUM_26
-#define ECHO_CEN            GPIO_NUM_27
-#define TRIG_DER            GPIO_NUM_33
-#define ECHO_DER            GPIO_NUM_35
+#define TRIG_IZQ            GPIO_NUM_18
+#define ECHO_IZQ            GPIO_NUM_16
+#define TRIG_CEN            GPIO_NUM_8
+#define ECHO_CEN            GPIO_NUM_9
+#define TRIG_DER            GPIO_NUM_17
+#define ECHO_DER            GPIO_NUM_15
 
 #define ULTRA_TIMEOUT_US    30000UL
 #define DESFASE_MS          60
@@ -89,15 +99,18 @@
 
 // --- GPS ---
 #define GPS_UART_NUM        UART_NUM_2
-#define GPS_TX_PIN          GPIO_NUM_17
-#define GPS_RX_PIN          GPIO_NUM_16
+#define GPS_TX_PIN          GPIO_NUM_36
+#define GPS_RX_PIN          GPIO_NUM_35
 #define GPS_BAUD_RATE       9600
 #define GPS_BUF_SIZE        256
 #define GPS_STALE_US        3000000LL   // 3 s
 
+// --- APP (Bluetooth) ---
+#define APP_CMD_TIMEOUT_US  300000LL    // 300 ms sin comando -> dir/herramientas a 0
+
 // --- I2C / MPU-6500 ---
-#define I2C_MASTER_SDA_IO   GPIO_NUM_21
-#define I2C_MASTER_SCL_IO   GPIO_NUM_23
+#define I2C_MASTER_SDA_IO   GPIO_NUM_6
+#define I2C_MASTER_SCL_IO   GPIO_NUM_7
 #define I2C_MASTER_NUM      I2C_NUM_0
 #define I2C_MASTER_FREQ_HZ  100000
 #define MPU_ADDR            0x69
@@ -135,7 +148,20 @@ static float g_gps_lat = NAN;
 static float g_gps_lon = NAN;
 static float g_gps_alt = NAN;
 static float g_gps_fix = -1.0f;
+static float g_gps_sats = -1.0f;
+static float g_gps_hdop = -1.0f;
 static int64_t g_t_gps_us = 0;
+
+// Cache APP (se llenara desde la tarea Bluetooth)
+static float g_app_connected = 0.0f;
+static float g_app_state = 0.0f;
+static float g_app_dir = 0.0f;
+static float g_app_speed = 0.0f;
+static float g_app_cutter = 0.0f;
+static float g_app_trimmer = 0.0f;
+static float g_app_seq = 0.0f;
+static float g_app_polygon_id = 0.0f;
+static int64_t g_t_app_cmd_us = 0;      // 0 = nunca llego comando
 
 // Offsets IMU
 static float gx_off = 0, gy_off = 0, gz_off = 0;
@@ -150,6 +176,7 @@ static float medirDistancia(gpio_num_t pinTrig, gpio_num_t pinEcho);
 static float ultra_para_publicar(float valor, int64_t t_us, int64_t ahora_us);
 static float gps_para_publicar(float valor, int64_t t_us, int64_t ahora_us);
 static float gps_fix_para_publicar(float fix, int64_t t_us, int64_t ahora_us);
+static float app_age_ms(int64_t t_us, int64_t ahora_us);
 
 static double nmea_to_decimal(const char *coord, char hemisphere);
 static bool parse_gga_line(
@@ -157,7 +184,9 @@ static bool parse_gga_line(
     double *latitude,
     double *longitude,
     double *altitude,
-    int *fix_quality
+    int *fix_quality,
+    int *satellites,
+    double *hdop
 );
 
 void ultrasonic_task(void *arg);
@@ -171,6 +200,8 @@ void gps_task(void *arg);
 // -------------------------------------------------
 void app_main(void)
 {
+    esp_log_level_set("*", ESP_LOG_NONE);
+
 #if defined(RMW_UXRCE_TRANSPORT_CUSTOM)
     rmw_uros_set_custom_transport(
         true,
@@ -262,6 +293,12 @@ static float gps_fix_para_publicar(float fix, int64_t t_us, int64_t ahora_us)
     return fix;
 }
 
+static float app_age_ms(int64_t t_us, int64_t ahora_us)
+{
+    if (t_us == 0) return -1.0f;
+    return (float)(ahora_us - t_us) / 1000.0f;
+}
+
 // -------------------------------------------------
 // GPS helpers
 // -------------------------------------------------
@@ -288,7 +325,9 @@ static bool parse_gga_line(
     double *latitude,
     double *longitude,
     double *altitude,
-    int *fix_quality
+    int *fix_quality,
+    int *satellites,
+    double *hdop
 )
 {
     if (strncmp(line, "$GPGGA", 6) != 0 && strncmp(line, "$GNGGA", 6) != 0) {
@@ -299,8 +338,7 @@ static bool parse_gga_line(
     strncpy(buffer, line, sizeof(buffer) - 1);
     buffer[sizeof(buffer) - 1] = '\0';
 
-    char *token;
-    char *saveptr;
+    char *token = buffer;
     int field_index = 0;
 
     char lat_str[20] = {0};
@@ -308,10 +346,15 @@ static bool parse_gga_line(
     char ns = '\0';
     char ew = '\0';
     char fix_str[8] = {0};
+    char sats_str[8] = {0};
+    char hdop_str[12] = {0};
     char alt_str[20] = {0};
 
-    token = strtok_r(buffer, ",", &saveptr);
+    // Separacion manual: strtok_r saltea campos vacios (",,") y corre los indices
     while (token != NULL) {
+        char *sep = strpbrk(token, ",*");
+        if (sep != NULL) *sep = '\0';
+
         switch (field_index) {
             case 2:
                 strncpy(lat_str, token, sizeof(lat_str) - 1);
@@ -328,6 +371,12 @@ static bool parse_gga_line(
             case 6:
                 strncpy(fix_str, token, sizeof(fix_str) - 1);
                 break;
+            case 7:
+                strncpy(sats_str, token, sizeof(sats_str) - 1);
+                break;
+            case 8:
+                strncpy(hdop_str, token, sizeof(hdop_str) - 1);
+                break;
             case 9:
                 strncpy(alt_str, token, sizeof(alt_str) - 1);
                 break;
@@ -335,11 +384,13 @@ static bool parse_gga_line(
                 break;
         }
 
-        token = strtok_r(NULL, ",", &saveptr);
+        token = (sep != NULL) ? sep + 1 : NULL;
         field_index++;
     }
 
     *fix_quality = atoi(fix_str);
+    *satellites = (sats_str[0] != '\0') ? atoi(sats_str) : -1;
+    *hdop = (hdop_str[0] != '\0') ? atof(hdop_str) : -1.0;
 
     if (*fix_quality > 0) {
         *latitude = nmea_to_decimal(lat_str, ns);
@@ -552,16 +603,18 @@ void gps_task(void *arg)
                     if (line_pos > 0) {
                         line[line_pos] = '\0';
 
-                        double lat, lon, alt;
-                        int fix_quality;
+                        double lat, lon, alt, hdop;
+                        int fix_quality, sats;
 
-                        if (parse_gga_line(line, &lat, &lon, &alt, &fix_quality)) {
+                        if (parse_gga_line(line, &lat, &lon, &alt, &fix_quality, &sats, &hdop)) {
                             xSemaphoreTake(g_data_mutex, portMAX_DELAY);
 
                             g_gps_lat = (float)lat;
                             g_gps_lon = (float)lon;
                             g_gps_alt = (float)alt;
                             g_gps_fix = (float)fix_quality;
+                            g_gps_sats = (float)sats;
+                            g_gps_hdop = (float)hdop;
                             g_t_gps_us = esp_timer_get_time();
 
                             xSemaphoreGive(g_data_mutex);
@@ -676,8 +729,10 @@ void micro_ros_task(void *arg)
         float bumper_l, bumper_c, bumper_r;
         float dist_izq, dist_cen, dist_der;
         float roll, pitch, yaw;
-        float gps_lat, gps_lon, gps_alt, gps_fix;
-        int64_t t_izq, t_cen, t_der, t_gps;
+        float gps_lat, gps_lon, gps_alt, gps_fix, gps_sats, gps_hdop;
+        float app_connected, app_state, app_dir, app_speed;
+        float app_cutter, app_trimmer, app_seq, app_polygon_id;
+        int64_t t_izq, t_cen, t_der, t_gps, t_app;
         int64_t ahora = esp_timer_get_time();
 
         xSemaphoreTake(g_data_mutex, portMAX_DELAY);
@@ -698,9 +753,28 @@ void micro_ros_task(void *arg)
         gps_lon = g_gps_lon;
         gps_alt = g_gps_alt;
         gps_fix = g_gps_fix;
+        gps_sats = g_gps_sats;
+        gps_hdop = g_gps_hdop;
         t_gps = g_t_gps_us;
 
+        app_connected = g_app_connected;
+        app_state = g_app_state;
+        app_dir = g_app_dir;
+        app_speed = g_app_speed;
+        app_cutter = g_app_cutter;
+        app_trimmer = g_app_trimmer;
+        app_seq = g_app_seq;
+        app_polygon_id = g_app_polygon_id;
+        t_app = g_t_app_cmd_us;
+
         xSemaphoreGive(g_data_mutex);
+
+        // Seguridad: sin conexion o comando viejo -> no reportar movimiento ni herramientas
+        if (app_connected < 0.5f || t_app == 0 || (ahora - t_app) > APP_CMD_TIMEOUT_US) {
+            app_dir = 0.0f;
+            app_cutter = 0.0f;
+            app_trimmer = 0.0f;
+        }
 
         // Bumpers desde cache
         msg.data.data[0] = bumper_l;
@@ -722,6 +796,21 @@ void micro_ros_task(void *arg)
         msg.data.data[10] = gps_para_publicar(gps_lon, t_gps, ahora);
         msg.data.data[11] = gps_para_publicar(gps_alt, t_gps, ahora);
         msg.data.data[12] = gps_fix_para_publicar(gps_fix, t_gps, ahora);
+
+        // Calidad GPS (mismo criterio que fix: -1 si dato viejo)
+        msg.data.data[13] = gps_fix_para_publicar(gps_sats, t_gps, ahora);
+        msg.data.data[14] = gps_fix_para_publicar(gps_hdop, t_gps, ahora);
+
+        // Pedidos de la APP
+        msg.data.data[15] = app_connected;
+        msg.data.data[16] = app_state;
+        msg.data.data[17] = app_dir;
+        msg.data.data[18] = app_speed;
+        msg.data.data[19] = app_cutter;
+        msg.data.data[20] = app_trimmer;
+        msg.data.data[21] = app_seq;
+        msg.data.data[22] = app_age_ms(t_app, ahora);
+        msg.data.data[23] = app_polygon_id;
 
         rcl_ret_t pub_rc = rcl_publish(&pub, &msg, NULL);
         if (pub_rc != RCL_RET_OK) {

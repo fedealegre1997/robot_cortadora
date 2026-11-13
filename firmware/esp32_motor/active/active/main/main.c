@@ -1,38 +1,52 @@
-//  Firmware ESP32-S3 — Control de Motores con micro-ROS
-//  Placa: ESP32-S3-WROOM-1 (N8R2, 8MB Flash, 2MB PSRAM)
-//  Driver de traccion: MC33926 (puente H, 4 canales LEDC — GPIO 4,5,6,7)
-//  Encoders en cuadratura: PCNT hardware (Izq GPIO 8/9, Der GPIO 10/11)
+//  Firmware ESP32 — Control de Motores con micro-ROS
+//  Placa: ESP32 clasico (WROOM), pines de docs/pines.md §2
+//         Banco de prueba: ESP32-S3 N16R8 con la placa 3 en el I2C 6/7, sin motores (bloque #if)
+//  Driver de traccion: MC33926 (puente H, 4 canales LEDC)
+//  Motores: Pololu 37Dx57L 100:1 12 V SIN encoder -> velocidad y distancia en lazo abierto calibrado
+//  IMU: placa 3 (clon de MPU de 6 ejes, WHO_AM_I 0x75, I2C 0x68) -> rumbo y giros en lazo cerrado
 //  Bordeadora: Sabertooth 2x25 v2, modo serial simplificado (UART2 TX, GPIO 17, 9600 baud)
 //  Cortadora central: AMC CBE12A1C, habilitacion por GPIO 18 → P1-9 INHIBIT (active LOW)
 //
-//  Protocolo:
+//  Protocolo v4:
 //      motion_cmd    = [cmd_id, modo, param, bordeadora_on, cortadora_on]
-//      motion_status = [cmd_id, estado, rpm_izq, rpm_der, feedback]
+//      motion_status = [cmd_id, estado, pwm_izq, pwm_der, feedback,
+//                       rumbo, rumbo_obj, imu_estado, seg_desde_cal]
+//      rumbo y rumbo_obj en decimas de grado (-1800..1799), positivo = antihorario (izquierda)
 //
 //  Modos (motion_cmd[1]):
-//      0 = STOP        param ignorado
-//      1 = ADELANTE    param = RPM base        (control por velocidad)
-//      2 = ATRAS       param = RPM base        (control por velocidad)
-//      3 = GIRO_IZQ    param = grados a girar  (control por posicion, giro pivot)
-//      4 = GIRO_DER    param = grados a girar  (control por posicion, giro pivot)
-//      5 = PIVOT       a definir               (placeholder)
+//      0 = STOP         param ignorado. Corta la traccion y publica DONE a los 0,5 s
+//      1 = ADELANTE     param = velocidad [cm/s], continuo, sostiene rumbo_obj con el giroscopio
+//      2 = ATRAS        param = velocidad [cm/s], continuo, sostiene rumbo_obj
+//      3 = GIRO_IZQ     param = grados: rumbo_obj += param, giro en el lugar
+//      4 = GIRO_DER     param = grados: rumbo_obj -= param, giro en el lugar
+//      5 = PIVOT        param = cm a avanzar (0 → 30): accesorios ON, adelante param cm,
+//                       atras 28 cm, swing 90° izq sobre la rueda izq (rumbo_obj += 90)
+//      6 = CALIBRAR     param = segundos de ventana (0 → 5). Traccion quieta, DONE al aceptar
+//      7 = FIJAR_RUMBO  param = grados: el rumbo actual pasa a valer param (no corta el movimiento)
 //
 //  Descripcion:
 //      Recibe comandos de alto nivel del Brain (ROS 2) por micro-ROS serial (UART0).
-//      El lazo de control corre LOCALMENTE en este ESP:
-//        - ADELANTE/ATRAS: PID de velocidad por rueda (forma incremental) + correccion
-//          de rumbo por diferencia de cuentas acumuladas de encoder.
-//        - GIRO_IZQ/GIRO_DER: PID de posicion por rueda (giro pivot, ruedas opuestas)
-//          hasta alcanzar el angulo, medido por encoders.
-//      Los encoders son la fuente de verdad. El IMU se procesa en el Brain (monitoreo).
+//      Sin encoders, el control se reparte asi:
+//        - Velocidad y distancia: lazo abierto, PWM = PWM_ARRANQUE + v / CM_S_POR_PWM
+//          (constantes a calibrar en piso). Las distancias del PIVOT se estiman integrando v.
+//        - Rumbo y giros: lazo cerrado con el giroscopio. Una tarea propia lee el IMU a 125 Hz e
+//          integra la velocidad de giro alrededor de la vertical (compensa la inclinacion).
+//          En recta, un PI sobre el error de rumbo corrige la diferencia de velocidad entre ruedas.
+//          En giro, un PI sobre la velocidad angular aplica el empuje que haga falta bajo carga.
+//        - rumbo_obj es absoluto: un giro completo lo deja exacto en el objetivo y la recta
+//          siguiente corrige el sobregiro. Si un giro se interrumpe, rumbo_obj pasa a ser el rumbo
+//          actual. Si al arrancar un movimiento el error supera 10° (robot movido a mano), tambien.
+//        - Recalibracion del bias del giroscopio en cada parada: con la traccion quieta 1 s y el
+//          giro sin bias < 1 dps, ventanas de 5 s con rechazo por ruido, tendencia y salto
+//          (pruebas de banco del 02/11/26, docs/pruebas.md §3).
 //      Controla la bordeadora (rampa soft-start anti-cogging, Sabertooth serial).
 //      Controla la cortadora central brushless (GPIO 18 HIGH = habilitado, LOW = inhibido).
-//      Los accesorios se aplican siempre, independientemente del estado de traccion.
 //      El ESP esta SIEMPRE atento: cualquier comando nuevo reemplaza al actual de inmediato.
+//      Un comando rechazado corta la traccion y publica ERROR con el codigo en feedback.
 //
-//  Version: 3.0
+//  Version: 4.0
 //  Autor: Angel Alegre
-//  Ultima verificacion: 03/06/2026
+//  Ultima verificacion: 02/11/2026 (compilacion; falta prueba en hardware)
 
 #include <stdio.h>
 #include <string.h>
@@ -48,7 +62,7 @@
 #include "driver/gpio.h"
 #include "driver/ledc.h"
 #include "driver/uart.h"
-#include "driver/pulse_cnt.h"
+#include "driver/i2c.h"
 #include "esp_err.h"
 #include "esp_timer.h"
 #include "esp_log.h"
@@ -67,16 +81,33 @@
 #define RCCHECK(fn)  { rcl_ret_t temp_rc = fn; if ((temp_rc != RCL_RET_OK)) { vTaskDelete(NULL); } }
 #define RCSOFTCHECK(fn) { rcl_ret_t temp_rc = fn; (void)temp_rc; }
 
+// La tarea del IMU consulta el dato nuevo cada 1 ms
+#if CONFIG_FREERTOS_HZ < 1000
+#error "El IMU necesita CONFIG_FREERTOS_HZ=1000 (sdkconfig.defaults). Correr idf.py fullclean y compilar de nuevo"
+#endif
+
 // =====================================================
-// DRIVER / MOTORES MC33926
+// PINES
 // =====================================================
-// Izquierda (M1)
+#if CONFIG_IDF_TARGET_ESP32S3
+// Banco de prueba: ESP32-S3 N16R8 con la placa 3 en el I2C 6/7, sin motores conectados
 #define M1_IN1_PIN   GPIO_NUM_4
 #define M1_IN2_PIN   GPIO_NUM_5
-
+#define M2_IN1_PIN   GPIO_NUM_15
+#define M2_IN2_PIN   GPIO_NUM_16
+#define IMU_SDA_PIN  GPIO_NUM_6
+#define IMU_SCL_PIN  GPIO_NUM_7
+#else
+// ESP32 clasico (docs/pines.md §2)
+// Izquierda (M1)
+#define M1_IN1_PIN   GPIO_NUM_32
+#define M1_IN2_PIN   GPIO_NUM_33
 // Derecha (M2)
-#define M2_IN1_PIN   GPIO_NUM_6
-#define M2_IN2_PIN   GPIO_NUM_7
+#define M2_IN1_PIN   GPIO_NUM_25
+#define M2_IN2_PIN   GPIO_NUM_26
+#define IMU_SDA_PIN  GPIO_NUM_21
+#define IMU_SCL_PIN  GPIO_NUM_22
+#endif
 
 // =====================================================
 // PWM
@@ -94,112 +125,126 @@
 #define CH_M2_IN2         LEDC_CHANNEL_3
 
 // =====================================================
-// ENCODERS EN CUADRATURA (PCNT hardware)
+// MODELO DE LAZO ABIERTO (velocidad → PWM) — CALIBRAR EN PISO
 // =====================================================
-#define ENC_L_A_PIN   GPIO_NUM_8
-#define ENC_L_B_PIN   GPIO_NUM_9
-#define ENC_R_A_PIN   GPIO_NUM_10
-#define ENC_R_B_PIN   GPIO_NUM_11
+// Estimado de la hoja de datos: 100 rpm a 12 V sin carga, bateria 4S (14,8 V), PWM 180 → 10,4 V
+// → 87 rpm → 68 cm/s con la rueda de R = 7,5 cm; -15 % por carga → ~58 cm/s.
+// Calibracion: ADELANTE a una velocidad durante 5 s, medir la distancia con cinta y ajustar
+// CM_S_POR_PWM; PWM_ARRANQUE es el PWM con el que la rueda empieza a moverse en el piso.
+#define PWM_MAX_TRACCION   180.0f   // tope decidido (≈180/255)
+#define PWM_ARRANQUE       20.0f    // PWM minimo con el que la rueda empieza a moverse
+#define CM_S_POR_PWM       0.36f    // pendiente de la velocidad por encima del arranque
+#define VEL_MAX_CM_S       ((PWM_MAX_TRACCION - PWM_ARRANQUE) * CM_S_POR_PWM)   // ≈ 57 cm/s
+#define VEL_MIN_CM_S       0.5f     // por debajo, la rueda se apaga
+#define ACCEL_CM_S2        25.0f    // rampa de velocidad en recta (v3: 30 RPM/s = 23,6 cm/s²)
 
-// Signo de conteo de cada encoder. Debe ser +1 cuando la rueda, girando en
-// sentido ADELANTE (DIR_FORWARD), hace que las cuentas AUMENTEN.
-// Si una rueda va adelante y su RPM se reporta negativa, invertir su signo.
-#define ENC_L_SIGN   (+1)
-#define ENC_R_SIGN   (-1)   // encoder derecho cableado invertido (verificado en banco)
-
-// Limites del contador de 16 bits del PCNT. Al alcanzarlos el hardware
-// resetea a 0 y dispara el evento que acumula el valor en un int64 por software.
-#define PCNT_H_LIM     30000
-#define PCNT_L_LIM    -30000
-#define PCNT_GLITCH_NS 1000   // filtro anti-rebote 1 us
-
-// =====================================================
-// PARAMETROS FISICOS / ENCODER
-// =====================================================
-#define CPR_MOTOR   16.0f                          // cuentas/vuelta del motor (fisico)
-#define QUAD_X4     4.0f                            // multiplicacion por cuadratura x4
-#define GEAR        90.0f                           // reductora 90:1
-#define CPR_OUT     (CPR_MOTOR * QUAD_X4 * GEAR)    // = 5760 cuentas/vuelta eje salida
-
-#define R_RUEDA     0.075f   // radio de rueda [m]
-#define L_RUEDAS    0.50f    // distancia entre ruedas, centro a centro [m]
-
-// Grados de eje de rueda por cuenta de encoder
-#define DEG_POR_CUENTA   (360.0f / CPR_OUT)
-
-// Cuentas de encoder por grado de rotacion del robot (giro pivot):
-//   cuentas = (grados_rad * L/2) / (2*pi*R) * CPR_OUT
-//           = grados * (L/2) / (360 * R) * CPR_OUT
-#define CUENTAS_POR_GRADO_PIVOT  ((L_RUEDAS / 2.0f) / (360.0f * R_RUEDA) * CPR_OUT)
-
-// =====================================================
-// LIMITES DE VELOCIDAD
-// =====================================================
-#define MAX_RPM_NOM   60.0f
-#define MAX_RPM       (MAX_RPM_NOM * 1.1f)   // 66 rpm
-
-// =====================================================
-// PID DE VELOCIDAD (forma incremental) — modos ADELANTE/ATRAS
-// =====================================================
-// Perfil piso liso:
-#define VEL_KP   19.5f
-#define VEL_KI   0.5f
-#define VEL_KD   0.1f
-#define VEL_CV_MAX   500.0f   // saturacion interna del controlador
-#define VEL_CV_MIN   25.0f    // piso minimo de cv para vencer zona muerta del driver
-// Banda muerta del error con histeresis (apaga integral cerca del setpoint)
-#define ERR_BAND_ENTER  0.5f
-#define ERR_BAND_EXIT   0.7f
-// Filtro pasa-bajos doble de la medicion de RPM
-// #define PV_ALPHA1   0.92f   // suave (piso liso)
-#define PV_ALPHA1   0.80f   // mas rapido (pasto, detecta tranque antes)
-#define PV_ALPHA2   0.30f
-//
-// Perfil pasto (agresivo — mayor carga dinamica):
-// #define VEL_KP   28.0f
-// #define VEL_KI   1.8f
-// #define VEL_KD   0.25f
-// #define VEL_CV_MIN   40.0f
-// #define ERR_BAND_ENTER  0.3f
-// #define ERR_BAND_EXIT   0.5f
-// #define PV_ALPHA2   0.50f
-
-// =====================================================
-// CONTROL DE RUMBO — correccion diferencial en recta
-// =====================================================
-// RPM de correccion por cada cuenta de diferencia izq-der acumulada.
-// Subir = corrige mas agresivo; ajustar en campo.
-// Pasto agresivo: HEADING_KP=0.035, HEADING_CORR_MAX=22.0
-#define HEADING_KP   0.02f
-// Tope absoluto de la correccion de rumbo [RPM]. Evita que una rueda quede
-// starvada a 0 si la realimentacion se descontrola.
-#define HEADING_CORR_MAX  15.0f
+#define L_RUEDAS_CM        50.0f    // distancia entre ruedas, centro a centro
+#define DEG_A_RAD          0.01745329252f
 
 // =====================================================
 // ARRANQUE SUAVE — limitador de slew del PWM (anti-patada)
 // =====================================================
 // Maxima variacion del PWM por segundo. Subir = arranca mas brusco.
 // #define PWM_SLEW_RATE   1200.0f   // pasto moderado
-// #define PWM_SLEW_RATE   1800.0f   // pasto agresivo: 0->255 en ~0.14s
-#define PWM_SLEW_RATE   600.0f    // piso liso: 0->255 en ~0.4s
-
-// Rampa de setpoint en recta (ADELANTE/ATRAS): la RPM objetivo sube
-// gradualmente a este ritmo [RPM/s] en vez de saltar de golpe.
-// Pasto agresivo: 55.0
-#define RPM_ACCEL   30.0f
+#define PWM_SLEW_RATE   600.0f    // piso liso: 0->180 en ~0.3s
 
 // =====================================================
-// GIRO POR VELOCIDAD — modos GIRO_IZQ/GIRO_DER
+// RUMBO EN RECTA — PI sobre el error de rumbo (giroscopio)
 // =====================================================
-// El giro se controla regulando la VELOCIDAD de rotacion (reusa el PID de
-// velocidad de cada rueda), no capando PWM. Asi la velocidad de giro es suave y
-// pareja, pero el lazo aplica todo el PWM que haga falta (hasta 255) para
-// mantenerla contra la carga -> el giro se completa aunque haya friccion.
-// Pasto agresivo: GIRO_RPM=32, GIRO_RPM_MIN=9, GIRO_DECEL_DEG=16
-#define GIRO_RPM        20.0f   // velocidad de crucero del giro [RPM por rueda]
-#define GIRO_RPM_MIN    5.0f    // velocidad minima en la aproximacion final [RPM]
-#define GIRO_DECEL_DEG  12.0f   // grados de robot antes del objetivo donde empieza a desacelerar
-#define GIRO_TOL_DEG    1.0f    // tolerancia para dar el giro por completado [grados de robot]
+// La correccion es una diferencia de velocidad entre ruedas [cm/s]: +corr = gira a la izquierda.
+// Con KP = 0,45 el error se corrige con una constante de tiempo de ~1 s (2·KP/L·57,3 ≈ 1/s).
+#define RUMBO_KP             0.45f   // cm/s por grado de error
+#define RUMBO_KI             0.10f   // cm/s por grado·s (corrige la asimetria entre motores)
+#define RUMBO_KD             0.05f   // cm/s por dps (amortigua con la velocidad de giro medida)
+#define RUMBO_CORR_MAX_CM_S  8.0f    // tope de la correccion (nunca mayor a la velocidad base)
+#define RUMBO_REANCLAJE_DEG  10.0f   // error mayor al arrancar → rumbo_obj = rumbo actual
+
+// =====================================================
+// GIRO — PI sobre la velocidad angular (giroscopio)
+// =====================================================
+// Perfil: rampa hasta la velocidad de crucero y desaceleracion en los ultimos grados.
+// El PWM = adelanto del modelo + PI; el PI empuja mas si la carga frena el giro (pasto).
+#define GIRO_W_DPS          36.0f   // crucero en el lugar (v3: 20 RPM por rueda = 36 °/s)
+#define SWING_W_DPS         18.0f   // crucero del swing del PIVOT (v3: rueda der a 20 RPM)
+#define GIRO_W_MIN_DPS      8.0f    // velocidad en la aproximacion final
+#define GIRO_DECEL_DEG      15.0f   // grados antes del objetivo donde empieza a desacelerar
+#define GIRO_ACCEL_DPS2     60.0f   // rampa de arranque del giro
+#define GIRO_TOL_DEG        1.0f    // tolerancia para cortar los motores
+#define GIRO_KP_W           1.0f    // PWM por dps de error de velocidad angular
+#define GIRO_KI_W           2.0f    // PWM por dps·s
+#define GIRO_EXTRA_MAX_PWM  80.0f   // tope del empuje del PI sobre el adelanto
+#define GIRO_TIMEOUT_BASE_MS 3000   // tiempo maximo = base + grados a la mitad del crucero
+// Asentado al final del giro: los motores cortan y se sigue integrando la inercia
+#define ASENTAR_W_DPS       2.0f
+#define ASENTAR_QUIETO_MS   300
+#define ASENTAR_MAX_MS      1500
+#define STOP_ASENTAR_MS     500     // STOP publica DONE despues de este tiempo
+
+// =====================================================
+// MODO PIVOT (5) — secuencia: adelante param cm + atras 28 cm + swing 90° rueda izq fija
+// =====================================================
+// Geometria del robot: H=40 cm (eje→frente), L=50 cm (entre ruedas).
+// Al girar 90° CCW sobre la rueda izq, la esquina delantera-derecha traza un arco de radio
+// sqrt(L²+H²) = 64 cm. La maxima Y alcanzada = 64 cm desde el pivote.
+// d_min = 64 - 40 = 24 cm para no chocar el borde norte; se usa 28 cm por margen real.
+// Sin encoders, las distancias se estiman integrando la velocidad comandada (calibrar).
+#define PIVOT_ADELANTE_CM_DEFAULT 30.0f  // distancia de avance por defecto si param=0
+#define PIVOT_ATRAS_CM            28.0f  // retroceso geometrico fijo (d_min=24 cm + 4 cm)
+#define PIVOT_DECEL_CM            5.0f   // zona de desaceleracion al acercarse al objetivo
+#define PIVOT_GIRO_DEG            90.0f  // angulo del swing
+#define PIVOT_VEL_CM_S            23.6f  // avance/retroceso (v3: 30 RPM)
+#define PIVOT_VEL_MIN_CM_S        6.0f
+
+// =====================================================
+// IMU — placa 3 (clon de MPU de 6 ejes)
+// =====================================================
+#define I2C_MASTER_NUM      I2C_NUM_0
+#define I2C_MASTER_FREQ_HZ  100000
+#define I2C_TIMEOUT         pdMS_TO_TICKS(50)
+
+#define MPU_ADDR_AD0_0      0x68
+#define MPU_ADDR_AD0_1      0x69
+#define MPU_SMPLRT_DIV      0x19
+#define MPU_CONFIG          0x1A
+#define MPU_GYRO_CONFIG     0x1B
+#define MPU_ACCEL_CONFIG    0x1C
+#define MPU_ACCEL_CONFIG2   0x1D
+#define MPU_INT_PIN_CFG     0x37
+#define MPU_INT_ENABLE      0x38
+#define MPU_INT_STATUS      0x3A    // bit0 RAW_DATA_RDY (se borra al leerlo)
+#define MPU_ACCEL_XOUT_H    0x3B    // 14 bytes big-endian: acel (6), temp (2), giro (6)
+#define MPU_USER_CTRL       0x6A
+#define MPU_PWR_MGMT_1      0x6B
+#define MPU_PWR_MGMT_2      0x6C
+#define MPU_WHO_AM_I        0x75
+
+#define CFG_USER_CTRL       0x00
+#define CFG_PWR_MGMT_1      0x01    // reloj PLL del giroscopo, sin sleep
+#define CFG_PWR_MGMT_2      0x00    // todos los ejes habilitados
+#define CFG_SMPLRT_DIV      0x07    // 1 kHz / (1 + 7) = 125 Hz
+#define CFG_CONFIG          0x03    // filtro del giro: 41 Hz
+#define CFG_GYRO_CONFIG     0x00    // +-250 dps (el robot gira a ~36 °/s)
+#define CFG_ACCEL_CONFIG    0x08    // +-4 g
+#define CFG_ACCEL_CONFIG2   0x03    // filtro del acel: 41 Hz
+#define CFG_INT_PIN_CFG     0x00
+#define CFG_INT_ENABLE      0x01    // RAW_RDY_EN
+
+#define GYRO_SENS_DPS       (1.0f / 131.0f)     // +-250 dps -> 131 LSB/dps
+#define ACC_SENS_G          (1.0f / 8192.0f)    // +-4 g     -> 8192 LSB/g
+
+#define IMU_TIMEOUT_US      250000  // sin muestras nuevas → falla, se reintenta cada 1 s
+#define IMU_DT_MAX_S        0.1f    // hueco maximo que se integra
+#define IMU_ESPERA_MS       6       // tras leer una muestra (la siguiente llega a los 8 ms)
+
+// Recalibracion en las paradas (afinado 02/11/26, docs/pruebas.md §3)
+#define RECAL_S                 5           // ventana: p95 del error a 60 s de 0,34-0,46°
+#define RECAL_QUIETO_DPS        1.0f        // giro sin bias por debajo de esto en los 3 ejes...
+#define RECAL_QUIETO_PREVIO_US  1000000     // ...durante este tiempo antes de calibrar
+#define RECAL_ESPERA_MAX_MS     10000       // CALIBRAR: tiempo extra para quedar quieto
+#define RECAL_RUIDO_MAX_DPS     0.5f
+#define RECAL_TENDENCIA_MAX_DPS 0.015f      // ~3 sigma de la diferencia entre mitades de 2,5 s
+#define RECAL_SALTO_MAX_DPS     0.03f       // el bias normal cambia ~0,002-0,013 dps en minutos
+#define RECAL_CAMBIO_ACEL_G     0.03f       // cambio de gravedad (~1,7°) = otra inclinacion
 
 // =====================================================
 // TOPICOS
@@ -210,10 +255,10 @@ static const char * TOPIC_MOTION_STATUS = "motion_status";
 // =====================================================
 // PROTOCOLO
 // motion_cmd    = [cmd_id, modo, param, bordeadora_on, cortadora_on]
-// motion_status = [cmd_id, estado, rpm_izq, rpm_der, feedback]
+// motion_status = [cmd_id, estado, pwm_izq, pwm_der, feedback, rumbo, rumbo_obj, imu_estado, seg_desde_cal]
 // =====================================================
 #define CMD_LEN     5
-#define STATUS_LEN  5
+#define STATUS_LEN  9
 
 // =====================================================
 // DRIVER SABERTOOTH (Bordeadora)
@@ -238,24 +283,59 @@ static const char * TOPIC_MOTION_STATUS = "motion_status";
 #define DIR_FORWARD 1
 
 // =====================================================
-// MODOS Y ESTADOS
+// MODOS, ESTADOS Y CODIGOS
 // =====================================================
 enum MotionMode {
-    MODE_STOP     = 0,
-    MODE_ADELANTE = 1,
-    MODE_ATRAS    = 2,
-    MODE_GIRO_IZQ = 3,
-    MODE_GIRO_DER = 4,
-    MODE_PIVOT    = 5
+    MODE_STOP        = 0,
+    MODE_ADELANTE    = 1,
+    MODE_ATRAS       = 2,
+    MODE_GIRO_IZQ    = 3,
+    MODE_GIRO_DER    = 4,
+    MODE_PIVOT       = 5,
+    MODE_CALIBRAR    = 6,
+    MODE_FIJAR_RUMBO = 7
 };
 
 enum MotionState {
     STATE_IDLE      = 0,
     STATE_ACCEPTED  = 1,
     STATE_EXECUTING = 2,
-    STATE_DONE      = 3,   // giro completado / comando finalizado
-    STATE_ABORTED   = 4,
-    STATE_ERROR     = 5
+    STATE_DONE      = 3,   // comando finalizado
+    STATE_ABORTED   = 4,   // reemplazado por otro comando antes de terminar
+    STATE_ERROR     = 5    // codigo en feedback (CodigoError)
+};
+
+enum CodigoError {
+    ERR_COMANDO       = 1,   // mal formado o parametro fuera de rango
+    ERR_IMU           = 2,   // IMU con falla o sin calibrar (modos que lo necesitan)
+    ERR_GIRO_TIEMPO   = 3,   // el giro no llego al objetivo a tiempo (trabado)
+    ERR_CAL_QUIETO    = 4,   // CALIBRAR: el robot no quedo quieto a tiempo
+    ERR_CAL_RUIDO     = 5,   // ventana con ruido > 0,5 dps (se movio)
+    ERR_CAL_TENDENCIA = 6,   // ventana con tendencia (movimiento lento)
+    ERR_CAL_SALTO     = 7    // bias distinto al anterior sin cambiar la inclinacion
+};
+
+enum ImuEstado {
+    IMU_FALLA        = 0,    // no responde o dejo de dar datos
+    IMU_INICIANDO    = 1,    // primera calibracion en curso (robot quieto al encender)
+    IMU_LISTO        = 2,
+    IMU_RECALIBRANDO = 3     // ventana de recalibracion en curso (ya tiene bias)
+};
+
+enum PivotStep {
+    PIVOT_STEP_ADELANTE = 0,   // avanzando N cm (param)
+    PIVOT_STEP_ATRAS    = 1,   // retrocediendo 28 cm (geometrico)
+    PIVOT_STEP_GIRO     = 2,   // swing 90° sobre rueda izq
+};
+
+enum SubFase {
+    SUB_MOVIENDO  = 0,
+    SUB_ASENTANDO = 1          // motores cortados, esperando que el giro se detenga
+};
+
+enum CalFase {
+    CAL_ESPERA  = 0,
+    CAL_VENTANA = 1
 };
 
 // =====================================================
@@ -277,51 +357,48 @@ std_msgs__msg__Int32MultiArray motion_cmd_msg;
 std_msgs__msg__Int32MultiArray motion_status_msg;
 
 // =====================================================
-// ENCODERS — handles y acumuladores int64
+// IMU — estado compartido entre la tarea del IMU y el control
 // =====================================================
-static pcnt_unit_handle_t enc_l_unit = NULL;
-static pcnt_unit_handle_t enc_r_unit = NULL;
-static volatile int64_t enc_l_accum = 0;   // acumulado por overflow (ISR)
-static volatile int64_t enc_r_accum = 0;
+typedef struct {
+    int      estado;         // ImuEstado
+    double   yaw;            // rumbo integrado [grados], continuo, + antihorario
+    float    w;              // velocidad de giro alrededor de la vertical [dps]
+    int64_t  t_cal_us;       // ultima calibracion aceptada (0 = nunca)
+    uint32_t n_cal_ok;       // calibraciones aceptadas
+    int      ult_rechazo;    // CodigoError de la ultima ventana rechazada
+    float    bias_z;         // bias z de la ultima calibracion [dps]
+    int      cal_dur_s;      // duracion de la ventana (CALIBRAR la cambia)
+} imu_t;
+
+static imu_t imu = { .estado = IMU_FALLA, .cal_dur_s = RECAL_S };
+static portMUX_TYPE imu_mux = portMUX_INITIALIZER_UNLOCKED;
+static volatile bool g_traccion_activa = false;    // control → IMU: no recalibrar
+static volatile bool g_imu_reiniciar_ventana = false;
+static uint8_t mpu_addr = 0;
 
 // =====================================================
 // ESTADO DEL CONTROL DE TRACCION
 // =====================================================
-typedef struct {
-    // PID velocidad (incremental) — usado en recta y en giro
-    float cv1, error1, error2;
-    bool  in_band;
-    // filtro de RPM
-    float pv_lp, pv_lp2;
-    // medicion
-    int64_t counts_prev;   // para calcular delta de RPM
-    float   rpm;           // RPM con signo (filtrada en magnitud)
-    // arranque suave: ultimo PWM aplicado con signo (+ adelante, - atras)
-    float last_pwm_signed;
-} wheel_ctrl_t;
-
-static wheel_ctrl_t wl = {0};   // rueda izquierda
-static wheel_ctrl_t wr = {0};   // rueda derecha
-
 // Comando activo
 static int32_t g_cmd_id = 0;
 static int32_t g_mode   = MODE_STOP;
 static int32_t g_param  = 0;
 static int32_t g_state  = STATE_IDLE;
-
-// Referencia de cuentas al iniciar un comando (para rumbo / posicion)
-static int64_t g_start_counts_l = 0;
-static int64_t g_start_counts_r = 0;
-
-// Setpoint de RPM rampeado (arranque suave en recta y en giro)
-static float g_base_ramp = 0.0f;
-
-// Direcciones de cada rueda durante un giro (DIR_FORWARD/DIR_REVERSE)
-static int32_t g_giro_dir_l = DIR_FORWARD;
-static int32_t g_giro_dir_r = DIR_FORWARD;
-
-// Feedback publicado en motion_status (recta: error_rumbo; giro: grados hechos)
 static int32_t g_feedback = 0;
+
+static float   g_pwm_l = 0.0f, g_pwm_r = 0.0f;   // ultimo PWM aplicado con signo (+ adelante)
+static float   g_vel_ramp = 0.0f;   // velocidad de recta rampeada [cm/s]
+static float   g_rumbo_int = 0.0f;  // integral del error de rumbo [grados·s]
+static double  g_rumbo_obj = 0.0;   // rumbo objetivo [grados], continuo
+static double  g_yaw_inicio = 0.0;  // rumbo al iniciar el giro
+static float   g_w_ramp = 0.0f;     // velocidad angular rampeada [dps]
+static float   g_w_int = 0.0f;      // integral del error de velocidad angular
+static float   g_dist_cm = 0.0f;    // distancia estimada de la fase lineal del PIVOT
+static int32_t g_pivot_step = PIVOT_STEP_ADELANTE;
+static int32_t g_sub = SUB_MOVIENDO;
+static int64_t g_t_inicio_ms = 0, g_t_sub_ms = 0, g_quieto_desde_ms = 0;
+static int64_t g_timeout_ms = 0;
+static uint32_t g_cal_ok_ref = 0;
 
 // Tiempos
 static int64_t last_status_pub_ms = 0;
@@ -345,6 +422,8 @@ static void stop_all_motors(void)
     pwm_write(CH_M1_IN2, 0);
     pwm_write(CH_M2_IN1, 0);
     pwm_write(CH_M2_IN2, 0);
+    g_pwm_l = 0.0f;
+    g_pwm_r = 0.0f;
 }
 
 // Capa fisica: aplica PWM y direccion en el MC33926 (2 canales por motor)
@@ -420,84 +499,6 @@ static void ledc_init_channel(gpio_num_t pin, ledc_channel_t channel)
 }
 
 // =====================================================
-// ENCODERS PCNT — callback de overflow y configuracion
-// =====================================================
-// Al alcanzar un watch point (H_LIM o L_LIM) el contador se reinicia a 0;
-// acumulamos el valor del limite en el int64 de software para no perder cuentas.
-static bool enc_on_reach(pcnt_unit_handle_t unit,
-                         const pcnt_watch_event_data_t *edata,
-                         void *user_ctx)
-{
-    volatile int64_t *accum = (volatile int64_t *)user_ctx;
-    *accum += edata->watch_point_value;
-    return false; // no despierta ninguna tarea de mayor prioridad
-}
-
-static void encoder_unit_init(pcnt_unit_handle_t *unit,
-                              gpio_num_t pin_a, gpio_num_t pin_b,
-                              volatile int64_t *accum)
-{
-    pcnt_unit_config_t unit_config = {
-        .high_limit = PCNT_H_LIM,
-        .low_limit  = PCNT_L_LIM,
-    };
-    ESP_ERROR_CHECK(pcnt_new_unit(&unit_config, unit));
-
-    pcnt_glitch_filter_config_t filter = { .max_glitch_ns = PCNT_GLITCH_NS };
-    ESP_ERROR_CHECK(pcnt_unit_set_glitch_filter(*unit, &filter));
-
-    // Canal A: cuenta flancos de pin_a, controlado por nivel de pin_b
-    pcnt_chan_config_t chan_a_cfg = {
-        .edge_gpio_num  = pin_a,
-        .level_gpio_num = pin_b,
-    };
-    pcnt_channel_handle_t chan_a = NULL;
-    ESP_ERROR_CHECK(pcnt_new_channel(*unit, &chan_a_cfg, &chan_a));
-    ESP_ERROR_CHECK(pcnt_channel_set_edge_action(chan_a,
-        PCNT_CHANNEL_EDGE_ACTION_DECREASE,   // flanco descendente
-        PCNT_CHANNEL_EDGE_ACTION_INCREASE)); // flanco ascendente
-    ESP_ERROR_CHECK(pcnt_channel_set_level_action(chan_a,
-        PCNT_CHANNEL_LEVEL_ACTION_KEEP,
-        PCNT_CHANNEL_LEVEL_ACTION_INVERSE));
-
-    // Canal B: cuenta flancos de pin_b, controlado por nivel de pin_a (=> x4)
-    pcnt_chan_config_t chan_b_cfg = {
-        .edge_gpio_num  = pin_b,
-        .level_gpio_num = pin_a,
-    };
-    pcnt_channel_handle_t chan_b = NULL;
-    ESP_ERROR_CHECK(pcnt_new_channel(*unit, &chan_b_cfg, &chan_b));
-    ESP_ERROR_CHECK(pcnt_channel_set_edge_action(chan_b,
-        PCNT_CHANNEL_EDGE_ACTION_INCREASE,
-        PCNT_CHANNEL_EDGE_ACTION_DECREASE));
-    ESP_ERROR_CHECK(pcnt_channel_set_level_action(chan_b,
-        PCNT_CHANNEL_LEVEL_ACTION_KEEP,
-        PCNT_CHANNEL_LEVEL_ACTION_INVERSE));
-
-    // Watch points en los limites para acumular el overflow
-    ESP_ERROR_CHECK(pcnt_unit_add_watch_point(*unit, PCNT_H_LIM));
-    ESP_ERROR_CHECK(pcnt_unit_add_watch_point(*unit, PCNT_L_LIM));
-    pcnt_event_callbacks_t cbs = { .on_reach = enc_on_reach };
-    ESP_ERROR_CHECK(pcnt_unit_register_event_callbacks(*unit, &cbs, (void *)accum));
-
-    ESP_ERROR_CHECK(pcnt_unit_enable(*unit));
-    ESP_ERROR_CHECK(pcnt_unit_clear_count(*unit));
-    ESP_ERROR_CHECK(pcnt_unit_start(*unit));
-
-    // Pull-up interno por seguridad (encoders push-pull lo dominan; evita ruido si se desconecta)
-    gpio_set_pull_mode(pin_a, GPIO_PULLUP_ONLY);
-    gpio_set_pull_mode(pin_b, GPIO_PULLUP_ONLY);
-}
-
-// Lectura del conteo total (acumulado + contador hardware), con signo aplicado
-static int64_t encoder_read(pcnt_unit_handle_t unit, volatile int64_t *accum, int sign)
-{
-    int count = 0;
-    pcnt_unit_get_count(unit, &count);
-    return (int64_t)sign * (*accum + (int64_t)count);
-}
-
-// =====================================================
 // INIT HARDWARE GLOBAL
 // =====================================================
 static esp_err_t motor_hw_init(void)
@@ -532,113 +533,474 @@ static esp_err_t motor_hw_init(void)
 
     stop_all_motors();
 
-    // Encoders en cuadratura por hardware
-    encoder_unit_init(&enc_l_unit, ENC_L_A_PIN, ENC_L_B_PIN, &enc_l_accum);
-    encoder_unit_init(&enc_r_unit, ENC_R_A_PIN, ENC_R_B_PIN, &enc_r_accum);
-
     return ESP_OK;
+}
+
+// =====================================================
+// IMU — acceso I2C (solo desde la tarea del IMU)
+// =====================================================
+static void imu_i2c_init(void)
+{
+    i2c_config_t i2c_c = {
+        .mode = I2C_MODE_MASTER,
+        .sda_io_num = IMU_SDA_PIN,
+        .scl_io_num = IMU_SCL_PIN,
+        .sda_pullup_en = GPIO_PULLUP_ENABLE,
+        .scl_pullup_en = GPIO_PULLUP_ENABLE,
+        .master.clk_speed = I2C_MASTER_FREQ_HZ
+    };
+    i2c_param_config(I2C_MASTER_NUM, &i2c_c);
+    i2c_driver_install(I2C_MASTER_NUM, I2C_MODE_MASTER, 0, 0, 0);
+}
+
+static esp_err_t leer_regs(uint8_t dev, uint8_t reg, uint8_t *buf, size_t len)
+{
+    return i2c_master_write_read_device(I2C_MASTER_NUM, dev, &reg, 1, buf, len, I2C_TIMEOUT);
+}
+
+static esp_err_t escribir_reg(uint8_t dev, uint8_t reg, uint8_t val)
+{
+    uint8_t buf[2] = {reg, val};
+    return i2c_master_write_to_device(I2C_MASTER_NUM, dev, buf, 2, I2C_TIMEOUT);
+}
+
+// Busca el MPU en 0x68 y 0x69 (cualquier WHO_AM_I: la placa 3 es un clon con 0x75)
+static bool detectar_mpu(void)
+{
+    const uint8_t cand[2] = {MPU_ADDR_AD0_0, MPU_ADDR_AD0_1};
+    for (int i = 0; i < 2; i++) {
+        uint8_t id = 0;
+        if (leer_regs(cand[i], MPU_WHO_AM_I, &id, 1) == ESP_OK && id != 0x00 && id != 0xFF) {
+            mpu_addr = cand[i];
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool configurar_mpu(void)
+{
+    escribir_reg(mpu_addr, MPU_PWR_MGMT_1, 0x80);   // reset por software
+    vTaskDelay(pdMS_TO_TICKS(100));
+    escribir_reg(mpu_addr, MPU_PWR_MGMT_1, CFG_PWR_MGMT_1);
+    vTaskDelay(pdMS_TO_TICKS(50));
+
+    const uint8_t cfg[][2] = {
+        {MPU_USER_CTRL,     CFG_USER_CTRL},
+        {MPU_PWR_MGMT_1,    CFG_PWR_MGMT_1},
+        {MPU_PWR_MGMT_2,    CFG_PWR_MGMT_2},
+        {MPU_SMPLRT_DIV,    CFG_SMPLRT_DIV},
+        {MPU_CONFIG,        CFG_CONFIG},
+        {MPU_GYRO_CONFIG,   CFG_GYRO_CONFIG},
+        {MPU_ACCEL_CONFIG,  CFG_ACCEL_CONFIG},
+        {MPU_ACCEL_CONFIG2, CFG_ACCEL_CONFIG2},
+        {MPU_INT_PIN_CFG,   CFG_INT_PIN_CFG},
+        {MPU_INT_ENABLE,    CFG_INT_ENABLE},
+    };
+
+    bool ok = true;
+    for (size_t i = 0; i < sizeof(cfg) / sizeof(cfg[0]); i++) {
+        uint8_t leido = 0;
+        escribir_reg(mpu_addr, cfg[i][0], cfg[i][1]);
+        if (leer_regs(mpu_addr, cfg[i][0], &leido, 1) != ESP_OK || leido != cfg[i][1]) {
+            ok = false;
+        }
+    }
+    vTaskDelay(pdMS_TO_TICKS(200));     // descartar las primeras muestras tras el reset
+    return ok;
+}
+
+// true si hay dato nuevo (bit RAW_DATA_RDY) y se leyo bien: acel en g, giro en dps (con bias)
+static bool leer_muestra(float acc[3], float giro[3])
+{
+    uint8_t st = 0, b[14];
+    if (leer_regs(mpu_addr, MPU_INT_STATUS, &st, 1) != ESP_OK || !(st & 0x01)) return false;
+    if (leer_regs(mpu_addr, MPU_ACCEL_XOUT_H, b, 14) != ESP_OK) return false;
+    for (int i = 0; i < 3; i++) {
+        acc[i]  = (int16_t)((b[2 * i] << 8) | b[2 * i + 1]) * ACC_SENS_G;
+        giro[i] = (int16_t)((b[8 + 2 * i] << 8) | b[9 + 2 * i]) * GYRO_SENS_DPS;
+    }
+    return true;
+}
+
+static imu_t imu_leer(void)
+{
+    imu_t s;
+    portENTER_CRITICAL(&imu_mux);
+    s = imu;
+    portEXIT_CRITICAL(&imu_mux);
+    return s;
+}
+
+static bool imu_listo(const imu_t *s)
+{
+    return s->estado == IMU_LISTO || s->estado == IMU_RECALIBRANDO;
+}
+
+static void imu_fijar_ventana(int segundos)
+{
+    portENTER_CRITICAL(&imu_mux);
+    imu.cal_dur_s = segundos;
+    portEXIT_CRITICAL(&imu_mux);
+}
+
+// =====================================================
+// IMU — tarea: lectura a 125 Hz, rumbo y recalibracion en las paradas
+// =====================================================
+static void imu_task(void *arg)
+{
+    (void)arg;
+
+    float bias[3] = {0}, up[3] = {0, 0, 1};   // up: vertical en ejes del sensor (acelerometro)
+    bool  cal_hecha = false;
+    int   rechazos_salto = 0;
+    bool  mpu_ok = false;
+    int64_t t_ult = 0, t_reintento = 0;
+
+    // Ventana de calibracion
+    int     fase = CAL_ESPERA;
+    int64_t quieto_desde = 0, t_ini = 0, dur_us = 0;
+    double  s[3] = {0}, s2[3] = {0}, sa[3] = {0}, sw_mitad[2] = {0}, dyaw_ventana = 0.0;
+    uint32_t n = 0, n_mitad[2] = {0};
+
+    imu_i2c_init();
+
+    while (1) {
+        int64_t ahora = esp_timer_get_time();
+
+        // Deteccion y configuracion (al arrancar y cada 1 s mientras falle)
+        if (!mpu_ok) {
+            if (ahora >= t_reintento) {
+                mpu_ok = detectar_mpu() && configurar_mpu();
+                t_reintento = ahora + 1000000;
+                t_ult = quieto_desde = esp_timer_get_time();
+                fase = CAL_ESPERA;
+            }
+            if (!mpu_ok) {
+                portENTER_CRITICAL(&imu_mux);
+                imu.estado = IMU_FALLA;
+                imu.w = 0.0f;
+                portEXIT_CRITICAL(&imu_mux);
+                vTaskDelay(pdMS_TO_TICKS(10));
+                continue;
+            }
+        }
+
+        float a[3], g[3];
+        if (!leer_muestra(a, g)) {
+            if (ahora - t_ult > IMU_TIMEOUT_US) {
+                mpu_ok = false;     // el MPU no responde o se reseteo (queda en sleep)
+            }
+            vTaskDelay(1);
+            continue;
+        }
+
+        ahora = esp_timer_get_time();
+        float dt = (ahora - t_ult) * 1e-6f;
+        t_ult = ahora;
+        if (dt > IMU_DT_MAX_S) dt = IMU_DT_MAX_S;
+
+        // Velocidad de giro alrededor de la vertical (compensa la inclinacion del montaje y el terreno)
+        float w = 0.0f;
+        if (cal_hecha) {
+            w = (g[0] - bias[0]) * up[0] + (g[1] - bias[1]) * up[1] + (g[2] - bias[2]) * up[2];
+        }
+
+        // ---- Recalibracion en las paradas ----
+        double corr_yaw = 0.0;
+        int rechazo = 0;
+        bool aceptada = false;
+        int dur_s = RECAL_S;
+
+        bool quieto = true;
+        if (cal_hecha) {
+            for (int i = 0; i < 3; i++) {
+                if (fabsf(g[i] - bias[i]) > RECAL_QUIETO_DPS) quieto = false;
+            }
+        }
+
+        if (g_traccion_activa || !quieto) {
+            if (fase == CAL_VENTANA) rechazo = ERR_CAL_QUIETO;
+            fase = CAL_ESPERA;
+            quieto_desde = ahora;
+        } else if (g_imu_reiniciar_ventana) {
+            // CALIBRAR: empezar una ventana nueva con la duracion pedida
+            g_imu_reiniciar_ventana = false;
+            fase = CAL_ESPERA;
+        }
+
+        if (fase == CAL_ESPERA && !g_traccion_activa && quieto
+            && ahora - quieto_desde >= RECAL_QUIETO_PREVIO_US) {
+            portENTER_CRITICAL(&imu_mux);
+            dur_s = imu.cal_dur_s;
+            portEXIT_CRITICAL(&imu_mux);
+            fase = CAL_VENTANA;
+            t_ini = ahora;
+            dur_us = (int64_t)dur_s * 1000000;
+            memset(s, 0, sizeof(s));
+            memset(s2, 0, sizeof(s2));
+            memset(sa, 0, sizeof(sa));
+            sw_mitad[0] = sw_mitad[1] = 0.0;
+            n_mitad[0] = n_mitad[1] = 0;
+            n = 0;
+            dyaw_ventana = 0.0;
+        }
+
+        if (fase == CAL_VENTANA) {
+            int mitad = (ahora - t_ini) * 2 >= dur_us;
+            for (int i = 0; i < 3; i++) {
+                s[i] += g[i];
+                s2[i] += (double)g[i] * g[i];
+                sa[i] += a[i];
+            }
+            sw_mitad[mitad] += g[0] * up[0] + g[1] * up[1] + g[2] * up[2];
+            n_mitad[mitad]++;
+            n++;
+            dyaw_ventana += w * dt;
+
+            if (ahora - t_ini >= dur_us && n >= 10 && n_mitad[0] > 0 && n_mitad[1] > 0) {
+                float b[3], ruido = 0.0f, am[3];
+                for (int i = 0; i < 3; i++) {
+                    b[i] = s[i] / n;
+                    double var = s2[i] / n - (double)b[i] * b[i];
+                    float r = var > 0 ? (float)sqrt(var) : 0.0f;
+                    if (r > ruido) ruido = r;
+                    am[i] = sa[i] / n;
+                }
+                float a_mod = sqrtf(am[0] * am[0] + am[1] * am[1] + am[2] * am[2]);
+                float tendencia = sw_mitad[1] / n_mitad[1] - sw_mitad[0] / n_mitad[0];
+                float salto = (b[0] - bias[0]) * up[0] + (b[1] - bias[1]) * up[1] + (b[2] - bias[2]) * up[2];
+                float da = sqrtf((am[0] - up[0] * a_mod) * (am[0] - up[0] * a_mod)
+                                 + (am[1] - up[1] * a_mod) * (am[1] - up[1] * a_mod)
+                                 + (am[2] - up[2] * a_mod) * (am[2] - up[2] * a_mod));
+
+                if (ruido > RECAL_RUIDO_MAX_DPS || a_mod < 0.5f) {
+                    rechazo = ERR_CAL_RUIDO;
+                } else if (cal_hecha && fabsf(tendencia) > RECAL_TENDENCIA_MAX_DPS) {
+                    rechazo = ERR_CAL_TENDENCIA;
+                } else if (cal_hecha && da <= RECAL_CAMBIO_ACEL_G && fabsf(salto) > RECAL_SALTO_MAX_DPS
+                           && rechazos_salto++ == 0) {
+                    // Se acepta al segundo rechazo seguido, por si el bias cambio de verdad
+                    rechazo = ERR_CAL_SALTO;
+                } else {
+                    aceptada = true;
+                    rechazos_salto = 0;
+                    // El robot estuvo quieto: lo que se integro en la ventana era error del bias viejo
+                    if (cal_hecha) corr_yaw = dyaw_ventana;
+                    for (int i = 0; i < 3; i++) {
+                        bias[i] = b[i];
+                        up[i] = am[i] / a_mod;
+                    }
+                    cal_hecha = true;
+                }
+                // Ventana siguiente enseguida si sigue quieto
+                fase = CAL_ESPERA;
+                quieto_desde = ahora - RECAL_QUIETO_PREVIO_US;
+            }
+        }
+
+        portENTER_CRITICAL(&imu_mux);
+        imu.yaw += (double)w * dt - corr_yaw;
+        imu.w = w;
+        if (aceptada) {
+            imu.t_cal_us = ahora;
+            imu.n_cal_ok++;
+            imu.bias_z = bias[2];
+        }
+        if (rechazo) imu.ult_rechazo = rechazo;
+        imu.estado = !cal_hecha ? IMU_INICIANDO : (fase == CAL_VENTANA ? IMU_RECALIBRANDO : IMU_LISTO);
+        portEXIT_CRITICAL(&imu_mux);
+
+        vTaskDelay(pdMS_TO_TICKS(IMU_ESPERA_MS));
+    }
 }
 
 // =====================================================
 // STATUS
 // =====================================================
-static void publish_status_now(int32_t cmd_id, int32_t estado,
-                               int32_t rpm_izq, int32_t rpm_der, int32_t feedback)
+static int32_t decimas_envueltas(double grados)
 {
+    double a = fmod(grados + 180.0, 360.0);
+    if (a < 0.0) a += 360.0;
+    return (int32_t)lround((a - 180.0) * 10.0);
+}
+
+static void publish_status_now(int32_t cmd_id, int32_t estado, int32_t feedback)
+{
+    imu_t s = imu_leer();
+    int64_t ahora_us = esp_timer_get_time();
+
     motion_status_msg.data.data[0] = cmd_id;
     motion_status_msg.data.data[1] = estado;
-    motion_status_msg.data.data[2] = rpm_izq;
-    motion_status_msg.data.data[3] = rpm_der;
+    motion_status_msg.data.data[2] = (int32_t)lroundf(g_pwm_l);
+    motion_status_msg.data.data[3] = (int32_t)lroundf(g_pwm_r);
     motion_status_msg.data.data[4] = feedback;
+    motion_status_msg.data.data[5] = decimas_envueltas(s.yaw);
+    motion_status_msg.data.data[6] = decimas_envueltas(g_rumbo_obj);
+    motion_status_msg.data.data[7] = s.estado;
+    motion_status_msg.data.data[8] = s.t_cal_us ? (int32_t)((ahora_us - s.t_cal_us) / 1000000LL) : -1;
     RCSOFTCHECK(rcl_publish(&motion_status_publisher, &motion_status_msg, NULL));
-    last_status_pub_ms = esp_timer_get_time() / 1000LL;
+    last_status_pub_ms = ahora_us / 1000LL;
 }
 
 // =====================================================
-// CONTROL: reset de estado de los lazos
+// CONTROL: salida a las ruedas
 // =====================================================
-static void reset_wheel_ctrl(wheel_ctrl_t *w, int64_t counts_now)
+// Velocidad de rueda con signo [cm/s] → PWM con signo, por el modelo de lazo abierto
+static float pwm_de_vel(float v)
 {
-    w->cv1 = 0.0f;
-    w->error1 = 0.0f;
-    w->error2 = 0.0f;
-    w->in_band = false;
-    w->pv_lp = 0.0f;
-    w->pv_lp2 = 0.0f;
-    w->counts_prev = counts_now;
-    w->rpm = 0.0f;
-    w->last_pwm_signed = 0.0f;   // arranca desde 0 -> rampa suave en cada comando
+    if (fabsf(v) < VEL_MIN_CM_S) return 0.0f;
+    float p = PWM_ARRANQUE + fabsf(v) / CM_S_POR_PWM;
+    if (p > PWM_MAX_TRACCION) p = PWM_MAX_TRACCION;
+    return (v > 0.0f) ? p : -p;
 }
 
-// Limitador de slew del PWM (anti-patada). Recibe el PWM deseado CON SIGNO
-// (+ adelante, - atras), limita su variacion por ciclo y devuelve la magnitud
-// limitada; la direccion resultante queda en *dir_out.
-static int32_t slew_pwm(wheel_ctrl_t *w, float desired_signed, float dt_s, int32_t *dir_out)
+// Limitador de slew por rueda (anti-patada) y salida al MC33926
+static float slew(float actual, float deseado, float dt_s)
 {
     float maxstep = PWM_SLEW_RATE * dt_s;
-    float delta = desired_signed - w->last_pwm_signed;
+    float delta = deseado - actual;
     if (delta >  maxstep) delta =  maxstep;
     if (delta < -maxstep) delta = -maxstep;
-    float limited = w->last_pwm_signed + delta;
-    w->last_pwm_signed = limited;
-
-    if (limited >= 0.0f) {
-        *dir_out = DIR_FORWARD;
-        return (int32_t)(limited + 0.5f);
-    }
-    *dir_out = DIR_REVERSE;
-    return (int32_t)(-limited + 0.5f);
+    float r = actual + delta;
+    if (r >  PWM_MAX_TRACCION) r =  PWM_MAX_TRACCION;
+    if (r < -PWM_MAX_TRACCION) r = -PWM_MAX_TRACCION;
+    return r;
 }
 
-// Mide RPM con signo a partir del delta de cuentas. Devuelve magnitud filtrada en *pv_out.
-static void measure_rpm(wheel_ctrl_t *w, int64_t counts_now, float dt_s, float *pv_out)
+static void aplicar_pwm(float pwm_l, float pwm_r, float dt_s)
 {
-    int64_t delta = counts_now - w->counts_prev;
-    w->counts_prev = counts_now;
-
-    float rev = (float)delta / CPR_OUT;
-    float rpm_signed = (rev / dt_s) * 60.0f;
-    w->rpm = rpm_signed;
-
-    float pv_raw = fabsf(rpm_signed);
-    w->pv_lp  = PV_ALPHA1 * w->pv_lp  + (1.0f - PV_ALPHA1) * pv_raw;
-    w->pv_lp2 = (1.0f - PV_ALPHA2) * w->pv_lp2 + PV_ALPHA2 * w->pv_lp;
-    *pv_out = w->pv_lp2;
+    g_pwm_l = slew(g_pwm_l, pwm_l, dt_s);
+    g_pwm_r = slew(g_pwm_r, pwm_r, dt_s);
+    apply_motor_command(g_pwm_l >= 0.0f ? DIR_FORWARD : DIR_REVERSE, (int32_t)lroundf(fabsf(g_pwm_l)),
+                        g_pwm_r >= 0.0f ? DIR_FORWARD : DIR_REVERSE, (int32_t)lroundf(fabsf(g_pwm_r)));
 }
 
-// PID de velocidad (forma incremental). sp y pv en RPM (magnitud). Devuelve PWM 0..255.
-static int32_t vel_pid_step(wheel_ctrl_t *w, float sp, float pv, float Tm)
+// Rampa hacia el objetivo: sube con la aceleracion dada, baja de inmediato (el slew suaviza)
+static float rampa(float actual, float objetivo, float accel, float dt_s)
 {
-    float error = sp - pv;
-
-    // Histeresis de banda muerta
-    float abs_e = fabsf(error);
-    if (w->in_band) {
-        if (abs_e >= ERR_BAND_EXIT) w->in_band = false;
+    if (actual < objetivo) {
+        actual += accel * dt_s;
+        if (actual > objetivo) actual = objetivo;
     } else {
-        if (abs_e <= ERR_BAND_ENTER) w->in_band = true;
+        actual = objetivo;
     }
-    float ki_eff = w->in_band ? 0.0f : VEL_KI;
+    return actual;
+}
 
-    // Coeficientes incrementales con Tm dinamico
-    float a0 = (VEL_KP + VEL_KD / Tm);
-    float a1 = (-VEL_KP + ki_eff * Tm - 2.0f * VEL_KD / Tm);
-    float a2 = (VEL_KD / Tm);
+// =====================================================
+// CONTROL: recta con rumbo sostenido (ADELANTE, ATRAS y fases lineales del PIVOT)
+// =====================================================
+// sentido +1 adelante, -1 atras; vel_obj en cm/s (magnitud)
+static void control_recta(float sentido, float vel_obj, const imu_t *s, float dt_s)
+{
+    if (vel_obj > VEL_MAX_CM_S) vel_obj = VEL_MAX_CM_S;
+    g_vel_ramp = rampa(g_vel_ramp, vel_obj, ACCEL_CM_S2, dt_s);
 
-    float cv_new = w->cv1 + a0 * error + a1 * w->error1 + a2 * w->error2;
+    float corr = 0.0f;
+    if (imu_listo(s)) {
+        float e = (float)(g_rumbo_obj - s->yaw);
+        g_rumbo_int += e * dt_s;
+        float int_max = RUMBO_CORR_MAX_CM_S / RUMBO_KI;
+        if (g_rumbo_int >  int_max) g_rumbo_int =  int_max;
+        if (g_rumbo_int < -int_max) g_rumbo_int = -int_max;
+        corr = RUMBO_KP * e + RUMBO_KI * g_rumbo_int - RUMBO_KD * s->w;
+        if (g_mode != MODE_PIVOT) g_feedback = (int32_t)lroundf(e * 10.0f);
+    }
+    // Ninguna rueda invierte en recta
+    float lim = fminf(RUMBO_CORR_MAX_CM_S, g_vel_ramp);
+    if (corr >  lim) corr =  lim;
+    if (corr < -lim) corr = -lim;
 
-    if (cv_new > VEL_CV_MAX) cv_new = VEL_CV_MAX;
-    if (sp <= 0.0f) cv_new = 0.0f;
-    else if (cv_new < VEL_CV_MIN) cv_new = VEL_CV_MIN;
+    // +corr → rueda der mas rapida que la izq → gira a la izquierda (en los dos sentidos)
+    aplicar_pwm(pwm_de_vel(sentido * g_vel_ramp - corr), pwm_de_vel(sentido * g_vel_ramp + corr), dt_s);
+    g_dist_cm += g_vel_ramp * dt_s;
+}
 
-    w->cv1 = cv_new;
-    w->error2 = w->error1;
-    w->error1 = error;
+// =====================================================
+// CONTROL: giro hacia g_rumbo_obj con lazo de velocidad angular
+// =====================================================
+// dir +1 izquierda (antihorario), -1 derecha. swing = solo avanza la rueda der (PIVOT).
+// Devuelve true al llegar (motores cortados).
+static bool control_giro(float dir, bool swing, float w_crucero, const imu_t *s, float dt_s)
+{
+    float restante = dir * (float)(g_rumbo_obj - s->yaw);
+    g_feedback = (int32_t)lround(dir * (s->yaw - g_yaw_inicio) * 10.0);
 
-    int32_t pwm = (int32_t)(cv_new * (255.0f / VEL_CV_MAX));
-    if (pwm > PWM_MAX_VALUE) pwm = PWM_MAX_VALUE;
-    if (pwm < 0) pwm = 0;
-    return pwm;
+    if (restante <= GIRO_TOL_DEG) {
+        stop_all_motors();
+        return true;
+    }
+
+    float w_obj = w_crucero;
+    if (restante < GIRO_DECEL_DEG) {
+        w_obj = GIRO_W_MIN_DPS + (w_crucero - GIRO_W_MIN_DPS) * (restante / GIRO_DECEL_DEG);
+    }
+    g_w_ramp = rampa(g_w_ramp, w_obj, GIRO_ACCEL_DPS2, dt_s);
+
+    // PI sobre la velocidad angular medida en el sentido del giro
+    float err = g_w_ramp - dir * s->w;
+    g_w_int += err * dt_s;
+    float int_max = GIRO_EXTRA_MAX_PWM / GIRO_KI_W;
+    if (g_w_int >  int_max) g_w_int =  int_max;
+    if (g_w_int < -int_max) g_w_int = -int_max;
+    float extra = GIRO_KP_W * err + GIRO_KI_W * g_w_int;
+    if (extra >  GIRO_EXTRA_MAX_PWM) extra =  GIRO_EXTRA_MAX_PWM;
+    if (extra < -GIRO_EXTRA_MAX_PWM) extra = -GIRO_EXTRA_MAX_PWM;
+
+    // Adelanto: velocidad de rueda para w (en el lugar: radio L/2; swing: radio L)
+    float v_rueda = g_w_ramp * DEG_A_RAD * (swing ? L_RUEDAS_CM : L_RUEDAS_CM * 0.5f);
+    float p = pwm_de_vel(v_rueda) + extra;
+    if (p < 0.0f) p = 0.0f;
+    if (p > PWM_MAX_TRACCION) p = PWM_MAX_TRACCION;
+
+    if (swing) {
+        aplicar_pwm(0.0f, dir * p, dt_s);
+    } else {
+        aplicar_pwm(-dir * p, dir * p, dt_s);
+    }
+    return false;
+}
+
+// Motores cortados: sigue integrando la inercia hasta que el giro se detiene. true al terminar.
+static bool asentar_giro(float dir, const imu_t *s, int64_t ahora_ms)
+{
+    stop_all_motors();
+    g_feedback = (int32_t)lround(dir * (s->yaw - g_yaw_inicio) * 10.0);
+    if (fabsf(s->w) > ASENTAR_W_DPS) g_quieto_desde_ms = ahora_ms;
+    return (ahora_ms - g_quieto_desde_ms >= ASENTAR_QUIETO_MS) || (ahora_ms - g_t_sub_ms >= ASENTAR_MAX_MS);
+}
+
+static bool girando_ahora(void)
+{
+    if (g_state != STATE_EXECUTING || g_sub != SUB_MOVIENDO) return false;
+    return g_mode == MODE_GIRO_IZQ || g_mode == MODE_GIRO_DER
+        || (g_mode == MODE_PIVOT && g_pivot_step == PIVOT_STEP_GIRO);
+}
+
+static void empezar_giro(double grados, int64_t ahora_ms, float w_crucero, const imu_t *s)
+{
+    g_rumbo_obj += grados;
+    g_yaw_inicio = s->yaw;
+    g_w_ramp = 0.0f;
+    g_w_int = 0.0f;
+    g_sub = SUB_MOVIENDO;
+    g_t_inicio_ms = ahora_ms;
+    g_timeout_ms = GIRO_TIMEOUT_BASE_MS + (int64_t)(fabs(grados) * 1000.0 / (w_crucero * 0.5f));
+}
+
+// Termina el comando activo: corta la traccion y publica el estado final
+static void terminar(int32_t estado, int32_t feedback)
+{
+    if (estado == STATE_ERROR && girando_ahora()) {
+        g_rumbo_obj = imu_leer().yaw;   // giro interrumpido: el objetivo pasa a ser el rumbo actual
+    }
+    stop_all_motors();
+    g_feedback = feedback;
+    publish_status_now(g_cmd_id, estado, feedback);
+    g_mode  = MODE_STOP;
+    g_state = STATE_IDLE;
+    g_traccion_activa = false;
 }
 
 // =====================================================
@@ -646,56 +1008,75 @@ static int32_t vel_pid_step(wheel_ctrl_t *w, float sp, float pv, float Tm)
 // =====================================================
 static void start_command(int32_t cmd_id, int32_t mode, int32_t param)
 {
-    int64_t cl = encoder_read(enc_l_unit, &enc_l_accum, ENC_L_SIGN);
-    int64_t cr = encoder_read(enc_r_unit, &enc_r_accum, ENC_R_SIGN);
+    imu_t s = imu_leer();
+    int64_t ahora_ms = esp_timer_get_time() / 1000LL;
+
+    // El comando activo queda reemplazado
+    if (g_state == STATE_EXECUTING) {
+        if (girando_ahora()) g_rumbo_obj = s.yaw;
+        publish_status_now(g_cmd_id, STATE_ABORTED, g_feedback);
+    }
+
+    // Seguir rampeando si la recta nueva va en el mismo sentido que la anterior
+    bool misma_recta = (g_state == STATE_EXECUTING && g_mode == mode
+                        && (mode == MODE_ADELANTE || mode == MODE_ATRAS));
 
     g_cmd_id = cmd_id;
     g_mode   = mode;
     g_param  = param;
-    g_start_counts_l = cl;
-    g_start_counts_r = cr;
+    g_feedback = 0;
+    g_state  = STATE_EXECUTING;
+    g_sub    = SUB_MOVIENDO;
+    g_t_inicio_ms = ahora_ms;
+    g_dist_cm = 0.0f;
+    g_traccion_activa = (mode != MODE_STOP && mode != MODE_CALIBRAR);
+    if (!misma_recta) {
+        g_vel_ramp = 0.0f;
+        g_rumbo_int = 0.0f;
+    }
+    if (mode != MODE_CALIBRAR) imu_fijar_ventana(RECAL_S);
 
-    reset_wheel_ctrl(&wl, cl);
-    reset_wheel_ctrl(&wr, cr);
-    g_base_ramp = 0.0f;   // arranque suave: la RPM objetivo arranca de 0
+    // Robot movido a mano (o giro fallido): el objetivo viejo ya no sirve
+    if (mode >= MODE_ADELANTE && mode <= MODE_PIVOT && imu_listo(&s)
+        && fabs(g_rumbo_obj - s.yaw) > RUMBO_REANCLAJE_DEG) {
+        g_rumbo_obj = s.yaw;
+    }
 
     switch (mode) {
         case MODE_STOP:
             stop_all_motors();
-            g_state = STATE_IDLE;
             break;
 
         case MODE_ADELANTE:
         case MODE_ATRAS:
-            g_state = STATE_EXECUTING;
             break;
 
         case MODE_GIRO_IZQ:
-            // Giro a la izquierda (pivot): rueda izq retrocede, rueda der avanza.
-            // El angulo objetivo esta en g_param; el progreso se mide por encoders.
-            g_giro_dir_l = DIR_REVERSE;
-            g_giro_dir_r = DIR_FORWARD;
-            g_state = STATE_EXECUTING;
+            empezar_giro((double)param, ahora_ms, GIRO_W_DPS, &s);
             break;
 
         case MODE_GIRO_DER:
-            // Giro a la derecha (pivot): rueda izq avanza, rueda der retrocede.
-            g_giro_dir_l = DIR_FORWARD;
-            g_giro_dir_r = DIR_REVERSE;
-            g_state = STATE_EXECUTING;
+            empezar_giro(-(double)param, ahora_ms, GIRO_W_DPS, &s);
             break;
 
         case MODE_PIVOT:
-            // TODO: modo especial a definir. Por seguridad, detener.
+            // Forzar accesorios ON independientemente de lo que mande el Brain
+            target_trimmer_state = 1;
+            gpio_set_level(CORTADORA_ENABLE_PIN, 1);
+            g_pivot_step = PIVOT_STEP_ADELANTE;
+            break;
+
+        case MODE_CALIBRAR:
             stop_all_motors();
-            g_mode = MODE_STOP;
-            g_state = STATE_IDLE;
+            portENTER_CRITICAL(&imu_mux);
+            imu.cal_dur_s = (param > 0) ? param : RECAL_S;
+            imu.ult_rechazo = 0;
+            portEXIT_CRITICAL(&imu_mux);
+            g_cal_ok_ref = s.n_cal_ok;
+            g_imu_reiniciar_ventana = true;
             break;
 
         default:
-            stop_all_motors();
-            g_mode = MODE_STOP;
-            g_state = STATE_ERROR;
             break;
     }
 }
@@ -705,120 +1086,114 @@ static void start_command(int32_t cmd_id, int32_t mode, int32_t param)
 // =====================================================
 static void control_step(float dt_s)
 {
-    int64_t cl = encoder_read(enc_l_unit, &enc_l_accum, ENC_L_SIGN);
-    int64_t cr = encoder_read(enc_r_unit, &enc_r_accum, ENC_R_SIGN);
+    if (g_state != STATE_EXECUTING) {
+        g_traccion_activa = false;
+        return;
+    }
 
-    float pv_l = 0.0f, pv_r = 0.0f;
-    measure_rpm(&wl, cl, dt_s, &pv_l);
-    measure_rpm(&wr, cr, dt_s, &pv_r);
+    imu_t s = imu_leer();
+    int64_t ahora_ms = esp_timer_get_time() / 1000LL;
+    g_traccion_activa = (g_mode != MODE_STOP && g_mode != MODE_CALIBRAR);
 
     switch (g_mode) {
 
-        case MODE_ADELANTE:
-        case MODE_ATRAS: {
-            int32_t dir = (g_mode == MODE_ADELANTE) ? DIR_FORWARD : DIR_REVERSE;
-            float dir_sign = (g_mode == MODE_ADELANTE) ? 1.0f : -1.0f;
-
-            // Distancia recorrida en la direccion comandada (cuentas, positivas si avanza bien)
-            float dist_l = (float)(cl - g_start_counts_l) * dir_sign;
-            float dist_r = (float)(cr - g_start_counts_r) * dir_sign;
-
-            // Correccion de rumbo por diferencia de cuentas acumuladas
-            float error_rumbo = dist_l - dist_r;
-            g_feedback = (int32_t)error_rumbo;
-            float corr = HEADING_KP * error_rumbo;
-            if (corr >  HEADING_CORR_MAX) corr =  HEADING_CORR_MAX;
-            if (corr < -HEADING_CORR_MAX) corr = -HEADING_CORR_MAX;
-
-            // Rampa de setpoint: la RPM base sube gradualmente hacia el objetivo
-            float base_target = (float)g_param;
-            if (base_target > MAX_RPM) base_target = MAX_RPM;
-            float ramp_step = RPM_ACCEL * dt_s;
-            if (g_base_ramp < base_target) {
-                g_base_ramp += ramp_step;
-                if (g_base_ramp > base_target) g_base_ramp = base_target;
-            } else if (g_base_ramp > base_target) {
-                g_base_ramp -= ramp_step;
-                if (g_base_ramp < base_target) g_base_ramp = base_target;
+        case MODE_STOP:
+            if (ahora_ms - g_t_inicio_ms >= STOP_ASENTAR_MS) {
+                terminar(STATE_DONE, 0);
             }
-            float base = g_base_ramp;
-
-            float sp_l = base - corr;
-            float sp_r = base + corr;
-            if (sp_l < 0.0f) sp_l = 0.0f;
-            if (sp_r < 0.0f) sp_r = 0.0f;
-            if (sp_l > MAX_RPM) sp_l = MAX_RPM;
-            if (sp_r > MAX_RPM) sp_r = MAX_RPM;
-
-            int32_t pwm_l = vel_pid_step(&wl, sp_l, pv_l, dt_s);
-            int32_t pwm_r = vel_pid_step(&wr, sp_r, pv_r, dt_s);
-
-            // Arranque suave: limitar la variacion del PWM por ciclo.
-            // Sin writeback a cv1: el PID incremental no integra error sostenido
-            // (solo reacciona a cambios), asi que no genera windup.
-            int32_t dl, dr;
-            int32_t out_l = slew_pwm(&wl, (dir == DIR_FORWARD) ? (float)pwm_l : -(float)pwm_l, dt_s, &dl);
-            int32_t out_r = slew_pwm(&wr, (dir == DIR_FORWARD) ? (float)pwm_r : -(float)pwm_r, dt_s, &dr);
-
-            apply_motor_command(dl, out_l, dr, out_r);
             break;
-        }
+
+        case MODE_ADELANTE:
+            control_recta(1.0f, (float)g_param, &s, dt_s);
+            break;
+
+        case MODE_ATRAS:
+            control_recta(-1.0f, (float)g_param, &s, dt_s);
+            break;
 
         case MODE_GIRO_IZQ:
         case MODE_GIRO_DER: {
-            // Progreso angular del robot: promedio de cuentas giradas por ambas ruedas
-            float dl_cnt = fabsf((float)(cl - g_start_counts_l));
-            float dr_cnt = fabsf((float)(cr - g_start_counts_r));
-            float prog_deg = ((dl_cnt + dr_cnt) * 0.5f) / CUENTAS_POR_GRADO_PIVOT;
-            float remaining = (float)g_param - prog_deg;
-            g_feedback = (int32_t)prog_deg;   // grados completados
-
-            // Giro completo: frenar y reportar
-            if (remaining <= GIRO_TOL_DEG) {
-                stop_all_motors();
-                wl.last_pwm_signed = 0.0f;
-                wr.last_pwm_signed = 0.0f;
-                publish_status_now(g_cmd_id, STATE_DONE,
-                                   (int32_t)wl.rpm, (int32_t)wr.rpm, g_param);
-                g_mode  = MODE_STOP;
-                g_state = STATE_IDLE;
-                break;
+            float dir = (g_mode == MODE_GIRO_IZQ) ? 1.0f : -1.0f;
+            if (g_sub == SUB_MOVIENDO) {
+                if (!imu_listo(&s)) {
+                    terminar(STATE_ERROR, ERR_IMU);
+                } else if (ahora_ms - g_t_inicio_ms > g_timeout_ms) {
+                    terminar(STATE_ERROR, ERR_GIRO_TIEMPO);
+                } else if (control_giro(dir, false, GIRO_W_DPS, &s, dt_s)) {
+                    g_sub = SUB_ASENTANDO;
+                    g_t_sub_ms = g_quieto_desde_ms = ahora_ms;
+                }
+            } else if (asentar_giro(dir, &s, ahora_ms)) {
+                terminar(STATE_DONE, g_feedback);   // grados girados (decimas), incluida la inercia
             }
-
-            // Setpoint de velocidad de giro con taper de desaceleracion al final
-            float sp_turn = GIRO_RPM;
-            if (remaining < GIRO_DECEL_DEG) {
-                sp_turn = GIRO_RPM_MIN + (GIRO_RPM - GIRO_RPM_MIN) * (remaining / GIRO_DECEL_DEG);
-            }
-
-            // Rampa de arranque suave hacia el setpoint (sube y baja)
-            float ramp_step = RPM_ACCEL * dt_s;
-            if (g_base_ramp < sp_turn) {
-                g_base_ramp += ramp_step;
-                if (g_base_ramp > sp_turn) g_base_ramp = sp_turn;
-            } else if (g_base_ramp > sp_turn) {
-                g_base_ramp -= ramp_step;
-                if (g_base_ramp < sp_turn) g_base_ramp = sp_turn;
-            }
-            float sp = g_base_ramp;
-
-            // PID de velocidad por rueda (regula la velocidad; aplica el PWM que
-            // haga falta hasta 255 para mantenerla contra la carga)
-            int32_t pwm_l = vel_pid_step(&wl, sp, pv_l, dt_s);
-            int32_t pwm_r = vel_pid_step(&wr, sp, pv_r, dt_s);
-
-            // Slew + direccion de giro de cada rueda
-            int32_t dl, dr;
-            int32_t out_l = slew_pwm(&wl, (g_giro_dir_l == DIR_FORWARD) ? (float)pwm_l : -(float)pwm_l, dt_s, &dl);
-            int32_t out_r = slew_pwm(&wr, (g_giro_dir_r == DIR_FORWARD) ? (float)pwm_r : -(float)pwm_r, dt_s, &dr);
-
-            apply_motor_command(dl, out_l, dr, out_r);
             break;
         }
 
-        case MODE_STOP:
+        case MODE_PIVOT: {
+            if (g_pivot_step == PIVOT_STEP_ADELANTE || g_pivot_step == PIVOT_STEP_ATRAS) {
+                // Fases lineales: distancia estimada en lazo abierto, rumbo sostenido
+                bool adelante = (g_pivot_step == PIVOT_STEP_ADELANTE);
+                float objetivo = adelante
+                    ? ((g_param > 0) ? (float)g_param : PIVOT_ADELANTE_CM_DEFAULT)
+                    : PIVOT_ATRAS_CM;
+                float restante = objetivo - g_dist_cm;
+                g_feedback = (int32_t)lroundf(g_dist_cm);   // cm recorridos (estimados)
+
+                if (restante <= 0.0f) {
+                    stop_all_motors();
+                    g_vel_ramp = 0.0f;
+                    g_dist_cm = 0.0f;
+                    if (adelante) {
+                        g_pivot_step = PIVOT_STEP_ATRAS;
+                    } else {
+                        if (!imu_listo(&s)) {
+                            terminar(STATE_ERROR, ERR_IMU);
+                            break;
+                        }
+                        g_pivot_step = PIVOT_STEP_GIRO;
+                        empezar_giro(PIVOT_GIRO_DEG, ahora_ms, SWING_W_DPS, &s);
+                    }
+                    break;
+                }
+
+                float vel = PIVOT_VEL_CM_S;
+                if (restante < PIVOT_DECEL_CM) {
+                    vel = PIVOT_VEL_MIN_CM_S + (PIVOT_VEL_CM_S - PIVOT_VEL_MIN_CM_S) * (restante / PIVOT_DECEL_CM);
+                }
+                control_recta(adelante ? 1.0f : -1.0f, vel, &s, dt_s);
+
+            } else if (g_sub == SUB_MOVIENDO) {
+                // Fase 3: swing 90° — rueda izq fija, solo rueda der avanza
+                if (!imu_listo(&s)) {
+                    terminar(STATE_ERROR, ERR_IMU);
+                } else if (ahora_ms - g_t_inicio_ms > g_timeout_ms) {
+                    terminar(STATE_ERROR, ERR_GIRO_TIEMPO);
+                } else if (control_giro(1.0f, true, SWING_W_DPS, &s, dt_s)) {
+                    g_sub = SUB_ASENTANDO;
+                    g_t_sub_ms = g_quieto_desde_ms = ahora_ms;
+                }
+            } else if (asentar_giro(1.0f, &s, ahora_ms)) {
+                terminar(STATE_DONE, g_feedback);
+            }
+            break;
+        }
+
+        case MODE_CALIBRAR:
+            if (s.estado == IMU_FALLA) {
+                terminar(STATE_ERROR, ERR_IMU);
+            } else if (s.n_cal_ok != g_cal_ok_ref) {
+                terminar(STATE_DONE, (int32_t)lroundf(s.bias_z * 1000.0f));   // bias z [mdps]
+            } else {
+                int dur_s = (g_param > 0) ? g_param : RECAL_S;
+                if (ahora_ms - g_t_inicio_ms > (int64_t)dur_s * 1000 + RECAL_ESPERA_MAX_MS) {
+                    terminar(STATE_ERROR, s.ult_rechazo ? s.ult_rechazo : ERR_CAL_QUIETO);
+                }
+            }
+            if (g_state != STATE_EXECUTING) imu_fijar_ventana(RECAL_S);
+            break;
+
         default:
-            stop_all_motors();
+            terminar(STATE_ERROR, ERR_COMANDO);
             break;
     }
 }
@@ -826,14 +1201,39 @@ static void control_step(float dt_s)
 // =====================================================
 // VALIDACION
 // =====================================================
-static bool is_valid_mode(int32_t m)
+static bool param_valido(int32_t mode, int32_t param)
 {
-    return (m >= MODE_STOP && m <= MODE_PIVOT);
+    switch (mode) {
+        case MODE_STOP:        return true;
+        case MODE_ADELANTE:
+        case MODE_ATRAS:       return param >= 0;            // > VEL_MAX se recorta
+        case MODE_GIRO_IZQ:
+        case MODE_GIRO_DER:    return param >= 0 && param <= 720;
+        case MODE_PIVOT:       return param >= 0 && param <= 300;
+        case MODE_CALIBRAR:    return param >= 0 && param <= 30;
+        case MODE_FIJAR_RUMBO: return param >= -360 && param <= 360;
+        default:               return false;
+    }
 }
 
 static bool is_valid_onoff(int32_t v)
 {
     return (v == 0 || v == 1);
+}
+
+// Rechazo: corta la traccion (los accesorios no cambian) y publica ERROR con el codigo
+static void rechazar(int32_t cmd_id, int32_t codigo)
+{
+    if (g_state == STATE_EXECUTING) {
+        if (girando_ahora()) g_rumbo_obj = imu_leer().yaw;
+        publish_status_now(g_cmd_id, STATE_ABORTED, g_feedback);
+    }
+    stop_all_motors();
+    g_mode  = MODE_STOP;
+    g_state = STATE_IDLE;
+    g_traccion_activa = false;
+    imu_fijar_ventana(RECAL_S);
+    publish_status_now(cmd_id, STATE_ERROR, codigo);
 }
 
 // =====================================================
@@ -844,7 +1244,7 @@ static void motion_cmd_callback(const void * msgin)
     const std_msgs__msg__Int32MultiArray * msg = (const std_msgs__msg__Int32MultiArray *)msgin;
 
     if (msg == NULL || msg->data.size < CMD_LEN) {
-        publish_status_now(-1, STATE_ERROR, 0, 0, 0);
+        rechazar(-1, ERR_COMANDO);
         return;
     }
 
@@ -854,8 +1254,8 @@ static void motion_cmd_callback(const void * msgin)
     int32_t bordeadora_on = msg->data.data[3];
     int32_t cortadora_on  = msg->data.data[4];
 
-    if (!is_valid_mode(mode) || !is_valid_onoff(bordeadora_on) || !is_valid_onoff(cortadora_on)) {
-        publish_status_now(cmd_id, STATE_ERROR, 0, 0, 0);
+    if (!param_valido(mode, param) || !is_valid_onoff(bordeadora_on) || !is_valid_onoff(cortadora_on)) {
+        rechazar(cmd_id, ERR_COMANDO);
         return;
     }
 
@@ -863,14 +1263,38 @@ static void motion_cmd_callback(const void * msgin)
     target_trimmer_state = bordeadora_on;
     gpio_set_level(CORTADORA_ENABLE_PIN, (uint32_t)cortadora_on);
 
+    imu_t s = imu_leer();
+
+    // FIJAR_RUMBO no reemplaza al movimiento: corre el rumbo y el objetivo lo mismo
+    if (mode == MODE_FIJAR_RUMBO) {
+        if (s.estado == IMU_FALLA) {
+            publish_status_now(cmd_id, STATE_ERROR, ERR_IMU);
+            return;
+        }
+        portENTER_CRITICAL(&imu_mux);
+        double offset = (double)param - imu.yaw;
+        imu.yaw += offset;
+        portEXIT_CRITICAL(&imu_mux);
+        g_rumbo_obj += offset;
+        g_yaw_inicio += offset;
+        publish_status_now(cmd_id, STATE_DONE, param * 10);
+        return;
+    }
+
     // Si la orden de movimiento es IDENTICA a la que ya se esta ejecutando
     // (mismo modo y param), no reiniciar el lazo de control: el comando solo
     // cambia accesorios. Asi se evita el "hipo" de marcha al, p.ej., prender
     // la cortadora mientras se avanza recto.
     if (mode == g_mode && param == g_param && g_state == STATE_EXECUTING) {
         g_cmd_id = cmd_id;   // actualizar el id para el feedback
-        publish_status_now(cmd_id, STATE_EXECUTING,
-                           (int32_t)wl.rpm, (int32_t)wr.rpm, 0);
+        publish_status_now(cmd_id, STATE_EXECUTING, g_feedback);
+        return;
+    }
+
+    // Giros y PIVOT necesitan el IMU calibrado; CALIBRAR, que responda
+    bool necesita_imu = (mode == MODE_GIRO_IZQ || mode == MODE_GIRO_DER || mode == MODE_PIVOT);
+    if ((necesita_imu && !imu_listo(&s)) || (mode == MODE_CALIBRAR && s.estado == IMU_FALLA)) {
+        rechazar(cmd_id, ERR_IMU);
         return;
     }
 
@@ -878,7 +1302,7 @@ static void motion_cmd_callback(const void * msgin)
     start_command(cmd_id, mode, param);
 
     // ACK del comando aceptado
-    publish_status_now(cmd_id, (g_state == STATE_ERROR) ? STATE_ERROR : STATE_ACCEPTED, 0, 0, 0);
+    publish_status_now(cmd_id, STATE_ACCEPTED, 0);
 }
 
 // =====================================================
@@ -889,6 +1313,10 @@ void micro_ros_task(void * arg)
     (void)arg;
 
     ESP_ERROR_CHECK(motor_hw_init());
+
+    // IMU en su propia tarea, con mas prioridad, para no perder muestras mientras micro-ROS bloquea
+    xTaskCreatePinnedToCore(imu_task, "imu_task", 4096, NULL,
+                            CONFIG_MICRO_ROS_APP_TASK_PRIO + 1, NULL, portNUM_PROCESSORS - 1);
 
     rcl_allocator_t allocator = rcl_get_default_allocator();
     rclc_support_t support;
@@ -955,7 +1383,7 @@ void micro_ros_task(void * arg)
         ON_NEW_DATA
     ));
 
-    publish_status_now(0, STATE_IDLE, 0, 0, 0);
+    publish_status_now(0, STATE_IDLE, 0);
 
     const int64_t STATUS_PERIOD_MS  = 200;
     const int64_t IDLE_HEARTBEAT_MS = 1000;
@@ -1003,14 +1431,12 @@ void micro_ros_task(void * arg)
         // 4) Publicacion de estado
         if (g_state == STATE_EXECUTING) {
             if ((now_ms - last_status_pub_ms) >= STATUS_PERIOD_MS) {
-                // g_feedback lo actualiza control_step (recta: error_rumbo; giro: grados hechos)
-                publish_status_now(g_cmd_id, STATE_EXECUTING,
-                                   (int32_t)wl.rpm, (int32_t)wr.rpm, g_feedback);
+                publish_status_now(g_cmd_id, STATE_EXECUTING, g_feedback);
             }
         } else {
-            // IDLE: heartbeat
+            // IDLE: heartbeat (incluye rumbo y estado del IMU)
             if ((now_ms - last_status_pub_ms) >= IDLE_HEARTBEAT_MS) {
-                publish_status_now(0, STATE_IDLE, 0, 0, 0);
+                publish_status_now(0, STATE_IDLE, 0);
             }
         }
 
@@ -1033,6 +1459,9 @@ void micro_ros_task(void * arg)
 
 void app_main(void)
 {
+    // UART0 es de micro-ROS: ningun log despues del arranque
+    esp_log_level_set("*", ESP_LOG_NONE);
+
 #if defined(RMW_UXRCE_TRANSPORT_CUSTOM)
     rmw_uros_set_custom_transport(
         true,

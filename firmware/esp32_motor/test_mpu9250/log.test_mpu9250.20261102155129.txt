@@ -1,0 +1,107 @@
+[ 164 s]  YAW GIRO =    -1.0 grados  |  giro actual =  +0.03 dps  |  T = 31.8 C
+[ 165 s]  YAW GIRO =    -0.9 grados  |  giro actual =  +0.03 dps  |  T = 31.8 C
+[ 166 s]  YAW GIRO =    -0.9 grados  |  giro actual =  +0.02 dps  |  T = 31.8 C
+[ 167 s]  YAW GIRO =    -1.0 grados  |  giro actual =  -0.06 dps  |  T = 31.8 C
+[ 168 s]  YAW GIRO =    -1.0 grados  |  giro actual =  -0.06 dps  |  T = 31.8 C
+[ 169 s]  YAW GIRO =    -1.1 grados  |  giro actual =  -0.05 dps  |  T = 31.8 C
+
+>>> RECALIBRACION: soltar la placa y no tocarla...
+
+Calibrando el giroscopo: dejar el sensor QUIETO durante 3 s...
+  Muestras de giro: 376 (125 Hz)
+  Bias giro  [dps]:     x=+9.032 y=+1.695 z=+0.012
+  Ruido giro [dps RMS]: x=0.044 y=0.047 z=0.041
+  Acel en reposo [g]:   x=-0.143 y=+0.033 z=+0.977 |A|=0.988 -> OK
+  Recalibracion OK
+==> REFERENCIA: YAW GIRO = 0 en esta posicion. Girar la placa y dejarla quieta en cada posicion
+[ 170 s]  YAW GIRO =    +0.0 grados  |  giro actual =  -0.02 dps  |  T = 31.8 C
+[ 171 s]  YAW GIRO =    +0.0 grados  |  giro actual =  -0.00 dps  |  T = 31.8 C
+[ 172 s]  YAW GIRO =    +0.0 grados  |  giro actual =  +0.01 dps  |  T = 31.8 C
+[ 173 s]  YAW GIRO =    +0.0 grados  |  giro actual =  -0.01 dps  |  T = 31.8 C
+[ 174 s]  YAW GIRO =    +0.0 grados  |  giro actual =  +0.01 dps  |  T = 31.8 C
+[ 175 s]  YAW GIRO =    +0.0 grados  |  giro actual =  +0.01 dps  |  T = 31.8 C
+[ 176 s]  YAW GIRO =    +0.0 grados  |  giro actual =  +0.00 dps  |  T = 31.8 C
+[ 177 s]  YAW GIRO =    +0.0 grados  |  giro actual =  +0.02 dps  |  T = 31.8 C
+[ 178 s]  YAW GIRO =    +2.4 grados  |  giro actual =  +2.34 dps  |  T = 31.8 C
+[ 179 s]  YAW GIRO =   +72.1 grados  |  giro actual = +69.22 dps  |  T = 31.8 C
+[ 180 s]  YAW GIRO =   +90.6 grados  |  giro actual = +18.51 dps  |  T = 31.8 C
+---- Minuto 3: deriva en el minuto +87.332 deg | yaw total +90.581 deg | |B| min/max 0.0/0.0 uT | errores I2C 0 ----
+[ 181 s]  YAW GIRO =   +90.7 grados  |  giro actual =  +0.07 dps  |  T = 31.8 C
+==> PARADA 1:  YAW GIRO =   +90.7 grados
+[ 182 s]  YAW GIRO =   +90.7 grados  |  giro actual =  +0.07 dps  |  T = 31.8 C
+[ 183 s]  YAW GIRO =   +90.8 grados  |  giro actual =  +0.08 dps  |  T = 31.8 C
+[ 184 s]  YAW GIRO =   +90.9 grados  |  giro actual =  +0.06 dps  |  T = 31.8 C
+[ 185 s]  YAW GIRO =   +90.9 grados  |  giro actual =  +0.08 dps  |  T = 31.8 C
+[ 186 s]  YAW GIRO =   +56.6 grados  |  giro actual = -34.14 dps  |  T = 31.8 C
+[ 187 s]  YAW GIRO =    +3.8 grados  |  giro actual = -52.81 dps  |  T = 31.8 C
+[ 188 s]  YAW GIRO =    +1.4 grados  |  giro actual =  -2.36 dps  |  T = 31.8 C
+[ 189 s]  YAW GIRO =    +1.4 grados  |  giro actual =  -0.02 dps  |  T = 31.8 C
+[ 190 s]  YAW GIRO =    +1.4 grados  |  giro actual =  -0.06 dps  |  T = 31.8 C
+[ 191 s]  YAW GIRO =    +1.2 grados  |  giro actual =  -0.19 dps  |  T = 31.8 C
+[ 192 s]  YAW GIRO =    +1.5 grados  |  giro actual =  +0.33 dps  |  T = 31.8 C
+==> PARADA 2:  YAW GIRO =    +1.6 grados
+[ 193 s]  YAW GIRO =    +1.5 grados  |  giro actual =  +0.06 dps  |  T = 31.8 C
+[ 194 s]  YAW GIRO =    +1.5 grados  |  giro actual =  -0.06 dps  |  T = 31.8 C
+[ 195 s]  YAW GIRO =   -60.5 grados  |  giro actual = -62.00 dps  |  T = 31.8 C
+[ 196 s]  YAW GIRO =   -87.0 grados  |  giro actual = -26.51 dps  |  T = 31.8 C
+[ 197 s]  YAW GIRO =   -86.9 grados  |  giro actual =  +0.04 dps  |  T = 31.8 C
+==> PARADA 3:  YAW GIRO =   -86.9 grados
+[ 198 s]  YAW GIRO =   -86.9 grados  |  giro actual =  +0.05 dps  |  T = 31.8 C
+[ 199 s]  YAW GIRO =   -69.8 grados  |  giro actual = +16.96 dps  |  T = 31.8 C
+[ 200 s]  YAW GIRO =   -20.1 grados  |  giro actual = +49.74 dps  |  T = 31.8 C
+[ 201 s]  YAW GIRO =    +1.6 grados  |  giro actual = +21.76 dps  |  T = 31.8 C
+==> PARADA 4:  YAW GIRO =    +1.7 grados
+[ 202 s]  YAW GIRO =    +1.7 grados  |  giro actual =  +0.04 dps  |  T = 31.8 C
+[ 203 s]  YAW GIRO =    +1.7 grados  |  giro actual =  +0.05 dps  |  T = 31.8 C
+[ 204 s]  YAW GIRO =    +1.8 grados  |  giro actual =  +0.05 dps  |  T = 31.9 C
+[ 205 s]  YAW GIRO =    +1.8 grados  |  giro actual =  +0.05 dps  |  T = 31.9 C
+[ 206 s]  YAW GIRO =    +1.9 grados  |  giro actual =  +0.04 dps  |  T = 31.9 C
+[ 207 s]  YAW GIRO =   +94.6 grados  |  giro actual = +92.77 dps  |  T = 31.9 C
+[ 208 s]  YAW GIRO =  +161.5 grados  |  giro actual = +67.15 dps  |  T = 31.9 C
+[ 209 s]  YAW GIRO =  +210.9 grados  |  giro actual = +49.33 dps  |  T = 31.9 C
+[ 210 s]  YAW GIRO =  +330.7 grados  |  giro actual = +120.06 dps  |  T = 31.9 C
+[ 211 s]  YAW GIRO =  +338.9 grados  |  giro actual =  +8.22 dps  |  T = 31.9 C
+[ 212 s]  YAW GIRO =  +357.8 grados  |  giro actual = +18.67 dps  |  T = 31.9 C
+[ 213 s]  YAW GIRO =  +358.0 grados  |  giro actual =  +0.28 dps  |  T = 31.9 C
+==> PARADA 5:  YAW GIRO =  +358.0 grados
+[ 214 s]  YAW GIRO =  +358.0 grados  |  giro actual =  +0.00 dps  |  T = 31.9 C
+[ 215 s]  YAW GIRO =  +358.0 grados  |  giro actual =  +0.00 dps  |  T = 31.9 C
+[ 216 s]  YAW GIRO =  +358.1 grados  |  giro actual =  +0.01 dps  |  T = 31.9 C
+[ 217 s]  YAW GIRO =  +301.1 grados  |  giro actual = -56.93 dps  |  T = 31.9 C
+[ 218 s]  YAW GIRO =  +248.5 grados  |  giro actual = -52.24 dps  |  T = 31.9 C
+[ 219 s]  YAW GIRO =  +149.8 grados  |  giro actual = -98.66 dps  |  T = 31.9 C
+[ 220 s]  YAW GIRO =   +57.0 grados  |  giro actual = -92.78 dps  |  T = 32.0 C
+[ 221 s]  YAW GIRO =    +6.0 grados  |  giro actual = -51.04 dps  |  T = 31.9 C
+[ 222 s]  YAW GIRO =    +3.7 grados  |  giro actual =  -2.27 dps  |  T = 32.0 C
+[ 223 s]  YAW GIRO =    +2.8 grados  |  giro actual =  -0.97 dps  |  T = 31.9 C
+==> PARADA 6:  YAW GIRO =    +2.8 grados
+[ 224 s]  YAW GIRO =    +2.7 grados  |  giro actual =  -0.01 dps  |  T = 32.0 C
+[ 225 s]  YAW GIRO =    +2.9 grados  |  giro actual =  +0.12 dps  |  T = 31.9 C
+[ 226 s]  YAW GIRO =    +2.9 grados  |  giro actual =  +0.03 dps  |  T = 31.9 C
+[ 227 s]  YAW GIRO =    +2.9 grados  |  giro actual =  +0.03 dps  |  T = 31.9 C
+[ 228 s]  YAW GIRO =    +3.0 grados  |  giro actual =  +0.02 dps  |  T = 31.9 C
+[ 229 s]  YAW GIRO =   +42.9 grados  |  giro actual = +40.18 dps  |  T = 32.0 C
+[ 230 s]  YAW GIRO =   +92.4 grados  |  giro actual = +49.41 dps  |  T = 32.0 C
+[ 231 s]  YAW GIRO =   +92.4 grados  |  giro actual =  +0.07 dps  |  T = 31.9 C
+==> PARADA 7:  YAW GIRO =   +92.4 grados
+[ 232 s]  YAW GIRO =   +92.5 grados  |  giro actual =  +0.07 dps  |  T = 31.9 C
+[ 233 s]  YAW GIRO =   +63.5 grados  |  giro actual = -29.03 dps  |  T = 31.9 C
+[ 234 s]  YAW GIRO =    +3.1 grados  |  giro actual = -60.44 dps  |  T = 32.0 C
+[ 235 s]  YAW GIRO =    +3.2 grados  |  giro actual =  +0.02 dps  |  T = 31.9 C
+==> PARADA 8:  YAW GIRO =    +3.2 grados
+[ 236 s]  YAW GIRO =    -6.2 grados  |  giro actual =  -9.40 dps  |  T = 32.0 C
+[ 237 s]  YAW GIRO =   -66.3 grados  |  giro actual = -59.89 dps  |  T = 31.9 C
+[ 238 s]  YAW GIRO =   -84.7 grados  |  giro actual = -18.36 dps  |  T = 32.0 C
+==> PARADA 9:  YAW GIRO =   -84.7 grados
+[ 239 s]  YAW GIRO =   -84.7 grados  |  giro actual =  +0.01 dps  |  T = 31.9 C
+[ 240 s]  YAW GIRO =   -84.6 grados  |  giro actual =  +0.01 dps  |  T = 32.0 C
+---- Minuto 4: deriva en el minuto -175.228 deg | yaw total -84.646 deg | |B| min/max 0.0/0.0 uT | errores I2C 0 ----
+[ 241 s]  YAW GIRO =   -84.6 grados  |  giro actual =  +0.02 dps  |  T = 32.0 C
+[ 242 s]  YAW GIRO =   -61.3 grados  |  giro actual = +23.28 dps  |  T = 32.0 C
+[ 243 s]  YAW GIRO =    +5.4 grados  |  giro actual = +66.40 dps  |  T = 32.0 C
+[ 244 s]  YAW GIRO =    +3.6 grados  |  giro actual =  -1.86 dps  |  T = 32.0 C
+==> PARADA 10:  YAW GIRO =    +3.6 grados
+[ 245 s]  YAW GIRO =    +3.6 grados  |  giro actual =  +0.04 dps  |  T = 32.0 C
+[ 246 s]  YAW GIRO =    +3.7 grados  |  giro actual =  +0.07 dps  |  T = 32.0 C
+[ 247 s]  YAW GIRO =    +3.7 grados  |  giro actual =  +0.08 dps  |  T = 32.0 C
+[ 248 s]  YAW GIRO =    +3.8 grados  |  giro actual =  +0.07 dps  |  T = 32.0 C

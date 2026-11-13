@@ -59,3 +59,88 @@ Este documento condensa el progreso general del proyecto a alto nivel día a dí
 - **Validación física en piso CON CARGA (03/06):** se bajó el robot al suelo y se probó: adelante, atrás, adelante 3s + atrás 3s de corrido, y giros de 90° a izquierda y derecha. Todo anduvo bien; los giros completaron los 90° (correctos a ojo en ambos sentidos) y la inversión de sentido adelante↔atrás resultó suave (sin tirón, gracias al slew). Bajo carga aparecieron dos puntos de tuning fino (no bloqueantes): la velocidad queda por debajo del setpoint (subir `VEL_KI`) y hay una deriva de rumbo leve ~0.8° (subir `HEADING_KP`).
 - **Análisis de tiempos:** la cadencia de `/motion_status` es ~230 ms (config 200 ms + overhead). La latencia comando→reacción por `ros2 topic pub --once` es ~0.87 s (artefacto del CLI: crea un nodo y hace discovery cada vez), mientras que con un **nodo persistente** (como será el Brain) baja a ~20-30 ms. Reaccionando al feedback `DONE` (estado=3) las secuencias encadenan sin huecos. Un giro de 90° tarda ~3.5 s sin carga y ~4.3 s con carga.
 - **Pendientes:** definir el modo PIVOT, tuning fino con carga (`VEL_KI`, `HEADING_KP`), y reescribir el Brain Python al protocolo de 5 campos.
+
+## [8 de Junio de 2026] — Firmware Motor v3.2: Modo PIVOT
+
+> Entrada retroactiva, reconstruida el 28/10/26 desde el código y git.
+
+- **Hito Principal:** se implementó el modo **PIVOT (5)**, que antes era un placeholder. Es una secuencia automática de cambio de franja: accesorios ON forzados → adelante `param` cm (0 → 30 cm) a 30 RPM → atrás 28 cm fijos → swing de 90° a la izquierda sobre la rueda izquierda fija → `DONE`.
+- **Criterio geométrico:** con H = 40 cm y L = 50 cm, la esquina delantera derecha barre un radio de ~64 cm en el swing; hace falta retroceder al menos 24 cm para no invadir el borde, y se usan 28 cm.
+- **Control:** las fases lineales usan el mismo lazo que la recta (rampa, rumbo, PID de velocidad, slew) con distancia medida por encoders y desaceleración en los últimos 5 cm; el swing usa el PID de velocidad solo en la rueda derecha, con el perfil trapezoidal de los giros.
+- **Estado:** compilado (08/06 14:53) y validado en físico: `DONE` con feedback = 90° y secuencia completa observada en `/motion_status`. Falta medir las distancias reales y confirmarlo en piso con carga.
+
+## [27 de Octubre de 2026] — E7 APP Android: Fase 1, ampliación de `/sensores`
+
+> Entrada retroactiva, reconstruida el 28/10/26 desde git y el resumen de la sesión.
+
+- **Hito Principal:** arranque de la entrega E7 (APP Flutter ↔ Bluetooth ↔ ESP32 sensor → micro-ROS → Raspberry). Se definió el diseño completo (control manual, modo autónomo, mapa offline, área de trabajo como polígono de hasta 10 vértices) y se completó la **fase 1**.
+- **Firmware Sensor v6.2:** `/sensores` pasó de 13 a **24 valores**: satélites y HDOP del GPS (13–14) más 9 campos de la APP (15–23: conexión, estado, dirección, velocidad, cortadora, bordeadora, secuencia, antigüedad del comando, id de polígono). Por seguridad, el ESP pone dirección y herramientas en 0 si la APP está desconectada o el comando tiene más de 300 ms. Backup previo en `versions/2026_10_27_MainV6.1_pre_app.c.bak`.
+- **Bug corregido:** el parser GGA del GPS usaba `strtok_r`, que saltea los campos vacíos y corre los índices (por ejemplo, con tramas sin fix). Se reemplazó por separación manual.
+- **Compatibilidad:** el Brain solo lee los índices 0–2, así que no se rompe.
+- **Estado:** compilado OK (285 KB, 73 % libre). El Bluetooth todavía no está implementado (los `app_*` quedan en sus valores por defecto). **Falta flashear y validar en hardware.**
+- **Pendientes de decisión:** BLE (NimBLE, recomendado) o Classic SPP; comportamiento sin APP conectada (quieto, recomendado, o el comportamiento actual); tamaño del cuadrado inicial del área (propuesto 10 × 10 m).
+
+## [28 de Octubre de 2026] — Puesta al día de la documentación
+
+- Se registraron en `docs/` los dos trabajos que faltaban (PIVOT del 08/06 y sensor v6.2 del 27/10).
+- Se corrigió en `CLAUDE.md` y en el SOP la lista de topics del sensor: el firmware publica **solo `/sensores`** (reliable), no `/bumpers`, `/ultrasonicos_cm`, `/gps_fix` ni `/imu/data_raw`.
+- Se corrigió en el estado actual el protocolo que manda hoy el Brain (7 campos, no 8).
+- Se creó `docs/e7_app_android.md`, el documento vivo con todo el diseño de la APP (requisitos, protocolo Bluetooth, seguridad, área de trabajo, UI del editor, entorno, hoja de ruta y decisiones pendientes).
+- Se detectó que el "giro continuo" previsto (reenviar GIRO ~15°) choca con el anti-hipo del motor y daría un giro a tirones; queda como decisión pendiente antes de la fase 4.
+- **Cambio de hardware de tracción:** los motores nuevos (Pololu 37Dx57L 12 V 100:1) **no tienen encoder**, y el firmware del motor v3.2 depende de los encoders para todo su control. Se documentó el impacto y las opciones; la más directa es la versión con encoder del mismo motor (Pololu #4755), que conserva el firmware cambiando solo una constante. Decisión pendiente.
+- Se creó `docs/componentes.md` con la lista oficial de componentes, su justificación y las discrepancias con el firmware (IMU, GPS, cantidad de finales de carrera, alimentación), más la ficha `Datasheet/Motor_traccion_Pololu_37D.txt`.
+- **Componentes y alimentación documentados:**
+  - Se corrigió el GPS (FSTR2).
+  - Hay dos IMU (MPU-6500 integrado y LSM9DS1 por integrar), y se agregará un 4.º final de carrera.
+  - Se documentó el árbol de alimentación: banco 8S para la cortadora y el LM2596, batería inferior 4S para la tracción y la bordeadora, y powerbank para el procesamiento.
+  - La verificación eléctrica dejó puntos a revisar: divisor en los ECHO, placa del LSM9DS1 a 5 V, motores de 12 V con hasta 16,8 V, límite USB de la Pi 5 y desbalance de baterías.
+  - Queda en análisis intercambiar los ESP32: el S3 solo tiene BLE, por lo que la decisión está atada a elegir BLE o SPP.
+- **LSM9DS1 identificado:** es una SparkFun LSM9DS1 Breakout de 1,9–3,6 V, sin regulador → **no se conecta a 5 V**; va al 3V3 del ESP32, y con eso el I2C queda a 3,3 V, compatible con cualquier ESP32. Puede compartir el bus con el MPU-6500 sin choque de direcciones.
+- Confirmado que los ECHO de los ultrasónicos ya tienen divisor a 3,3 V.
+- Aprobado limitar el PWM de la tracción a ≈180/255; se acordó medir el consumo USB de la Pi 5 y monitorear cada batería.
+- Decidido: el LSM9DS1 se alimenta del 3V3 del ESP32 (la línea de 3,3 V del equipo). Falta definir en qué ESP32 va.
+- **Descartado el motor con encoder (#4755):** no se consigue. La tracción queda sin encoders. Se propuso pasar el LSM9DS1 al ESP32 del motor para controlar rumbo y giros con el giróscopo, con velocidad y distancias en lazo abierto calibrado (pendiente de confirmación).
+- **Ubicación de los IMU decidida:** el LSM9DS1 va en el ESP32 motor, lejos del brushless; el giróscopo no necesita estar en el centro del robot. El MPU-6500 se queda en el ESP32 sensor como verificación para la Raspberry.
+- Análisis de "¿irá recto?": el lazo de rumbo con giróscopo compensa motores desparejos y terreno, y no lo engaña el patinamiento; el límite es la deriva lenta del giróscopo. Se propuso medirla antes de reescribir el control.
+- Se propuso intercambiar los ESP32: el S3 pasa a sensores (por el Bluetooth) y el clásico a motores. El usuario lo ve sencillo (protoboard) y confirma al retomar, junto con los mapas de pines, que no pueden ser idénticos.
+- **Cierre de la sesión de madrugada.** Pasos para retomar en `00_estado_actual.md` §3.
+
+## [2 de Noviembre de 2026] — Intercambio de ESP32 y mapa de pines
+
+- **Decisión:** se confirma el intercambio de placas. El **ESP32-S3 pasa a sensores** y el **ESP32 clásico pasa a motores**. En consecuencia, el Bluetooth de la APP (E7) es **BLE**, porque el S3 no tiene Bluetooth Classic.
+- **Mapa de pines acordado** en `docs/pines.md`. En el S3, el usuario eligió los pines de los ultrasónicos y los bumpers; el GPS y el I2C del MPU-6500 se reubicaron en los GPIO 4–7. Se descartaron los GPIO 3 y 46 para el ECHO del centro por ser strapping (el 46 puede hacer fallar el flasheo) y se usó el 9.
+- **Motor en el clásico:** el PWM de las ruedas pasa a los GPIO 32, 33, 25 y 26, que no sacan pulsos al arrancar. El Sabertooth (17) y la cortadora (18) conservan sus pines, el LSM9DS1 va al I2C 21/22 y se eliminan los encoders.
+- **Pendientes antes de cablear:**
+  - Confirmar N8R2 en el S3 y WROOM en el clásico.
+  - Ver en qué pin está el LED RGB de la placa S3.
+  - Revisar el comportamiento del INHIBIT̄ de la cortadora con el pin flotante.
+- Todavía no se tocó el firmware ni el cableado.
+- **IMU de respaldo:** una placa MPU-9250 (chip "MP92", con magnetómetro, sin verificar) queda como seguro por si el LSM9DS1 no funciona. Se usa con el mismo cableado.
+- **Firmware de prueba del LSM9DS1** (`firmware/esp32_motor/test_lsm9ds1`, para el ESP32 clásico): detecta el sensor, verifica la configuración, calibra el giróscopo, mide la deriva durante 5 min y muestra el magnetómetro para la prueba con la cortadora. Compilado OK; falta correrlo en hardware. Procedimiento en `docs/pruebas.md`.
+- La prueba del LSM9DS1 se hace en una ESP32-S3 N16R8 de prueba (I2C en los GPIO 6/7); el firmware compila para los dos targets.
+- **LSM9DS1 funcionando** en la placa de prueba (tras cambiar un cable suelto): direcciones 0x6B/0x1E confirmadas, ruido del giro ~0,06 dps, acelerómetro ~1 g y magnetómetro ~23 µT (campo terrestre local). El firmware de prueba (v1.2) ahora rechaza calibraciones con movimiento y detecta si el sensor se reinicia. Falta la corrida de deriva de 5 min sin tocar.
+- **Deriva del giróscopo del LSM9DS1 medida en reposo: ≈ 0,1–0,2 °/min** (5 min, 0 errores I2C), muy por debajo del umbral de 1 °/min. Alcanza para controlar el rumbo con el giróscopo. La corrida tuvo un movimiento externo en el minuto 4, que se identificó y se excluyó en el análisis.
+- **Tarde:** se repitió la prueba de deriva del LSM9DS1. Recién conectado dio **5,8 °/min**, y a los ~6 min, **1,25 °/min**, contra 0,1–0,2 °/min con horas de encendido. El giróscopo tiene un **calentamiento inicial**: su bias cambia durante varios minutos después de encenderlo. Para el robot implica esperar a que se estabilice y recalibrar en cada parada. Falta medir cuánto dura el calentamiento.
+- **Curva de 30 min del giróscopo:** el bias cambia más en los primeros minutos y después sigue oscilando un poco (también por la temperatura). Con los datos se simuló **recalibrar 3 s en cada parada**: el error de rumbo tras 1 min de recta queda en ~0,4° típico y ~1,3° en el peor caso (con ≥ 6 min de encendido). El giróscopo sirve, con recalibración frecuente.
+- **El usuario quiere usar el magnetómetro.** Se cargó la v1.3 del firmware de prueba, con un versus giroscopio vs magnetómetro (calibración con el botón BOOT, comparación en giros, en el tiempo y con perturbaciones). Falta correrlo con el usuario en la mesa.
+- **Primer versus giroscopio vs magnetómetro:** el giróscopo midió bien los giros. La brújula tenía el **signo invertido** (supuesto de ejes incorrecto) y errores de hasta ~15° según hacia dónde apunte, porque la calibración era demasiado simple. La placa tiene un campo magnético propio de ~26 µT. El sensor volvió a reiniciarse al girarlo: **falta asegurar el cableado**. Se preparó la **v1.4** con el signo corregido y una calibración por ajuste de elipse (verificada en la PC con datos sintéticos).
+- **Segundo versus (v1.5):** el **giróscopo midió todos los giros de ±90° con ±1°**. La brújula, ya con el signo correcto, se equivocó **16–35°** a ±90°, de forma repetible. El campo medido cerca del sensor es anormal (13,8 µT horizontal), así que lo más probable es que el entorno o el montaje la perturben (protoboard, placa, notebook). Falta repetirlo con el sensor sobre un soporte no metálico, lejos de todo.
+- **Decisión:** se descarta la brújula por ahora. El robot controla el rumbo con el **giróscopo**, recalibrando en cada parada. Siguiente: probar la placa 3 (MPU-9250) para comparar.
+- **Placa 3 (clon de MPU, 6 ejes):** en 30 min desde frío, su giróscopo resultó **~3 veces mejor que el del LSM9DS1**. Recalibrando en cada parada, el error tras 1 min es de 0,14° típico y 0,4° en el peor caso, y casi no necesita calentamiento. Recomendación: usarla en el ESP32_motores y dejar el LSM9DS1 de respaldo (falta confirmar y hacer el giro de 90°).
+- **Prueba de giro de la placa 3:** los giros de 90° dan entre 87,9 y 90,5° y las vueltas completas ~356° (girando rápido a mano; puede ser saturación o un error de escala de ~1 %, corregible). Pasa la validación. Lección: el robot tiene que esperar a estar bien quieto antes de recalibrar.
+- **Decisión: la placa 3 es el IMU del ESP32_motores** (LSM9DS1 de respaldo). Al giróscopo no le afectan los imanes ni el metal; para montarlo hay que cuidar la vibración, el calor y el cableado.
+- **Afinado de la placa 3 (el usuario ausente):**
+  - Allan y barrido de la recalibración: **5 s en cada parada** da el mejor equilibrio. La temperatura no hace falta compensarla.
+  - Los 356–358° de las vueltas se explican por la **inclinación de la placa**; la v1.2 lo compensa con el acelerómetro.
+  - Hallazgo: **el bias cambió al nivelar la placa** (~1 dps/g si depende de la orientación). Falta una prueba de inclinación para ver si se puede compensar.
+  - Se cargó la v1.2 (recalibración robusta, yaw vertical) y quedó un borrador de parámetros para el firmware del motor v4.
+- Se corrigió el mapa de pines del S3 en `pines.md`: **GPS en el 35/36** y **4.º bumper en el 39**, como se había acordado.
+- **Firmware del motor v4.0 (sin encoders):** el rumbo y los giros se controlan con el giróscopo de la placa 3, y la velocidad y las distancias en lazo abierto (constantes a calibrar en piso). El motor recalibra el giróscopo solo en cada parada. **Protocolo nuevo:** misma orden de 5 campos, velocidad en cm/s, modos nuevos CALIBRAR (6) y FIJAR_RUMBO (7), y un status de 9 campos con el rumbo y el estado del IMU (detalle en `arquitectura.md`). La v3.2 quedó respaldada en `versions/`. Compila para el ESP32 clásico y para la S3 de prueba. Se cargó en la S3, pero no conectó con el agente porque el cable estaba en el conector USB nativo y no en el COM; falta repetir la prueba (`pruebas.md` §4).
+
+## 13/11/26
+
+- **Raspberry Pi 4 configurada** como el nuevo host de producción (la Pi 5 se perdió). OS: Ubuntu 26.04 "Resolute", arm64, 7,6 GB RAM. Se decidió no reflashear por coexistir con el proyecto `cabeza_social`.
+- Instalado **ROS 2 Lyrical** (versión oficial para Ubuntu 26.04) vía `packages.ros.org/ros2/ubuntu resolute`. El Brain compila y `ros2 pkg list` muestra `cortadora_brain`.
+- **micro-ROS agent compilado desde source** (branch `lyrical` del repo oficial). El agente usa un SuperBuild que descarga `microxrcedds_agent` automáticamente. Se resolvió un conflicto con Python 3.12 de `uv` forzando el Python del sistema (`/usr/bin/python3`). Binario operativo en `~/microros_agent_ws/`.
+- Creados `scripts/pi/{env.sh,run_brain.sh,run_agent_serial.sh}` y copiados a la Pi.
+- `CLAUDE.md` y `docs/00_estado_actual.md` actualizados: PC = Jazzy/firmware, Pi 4 = Lyrical/producción.
