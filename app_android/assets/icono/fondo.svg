@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 108 108" width="108" height="108">
+  <!-- Capa de fondo del icono adaptativo (108x108 dp): cesped cortado a franjas,
+       verde profundo para que contraste con el cuerpo verde claro de la figura. -->
+  <rect width="108" height="108" fill="#1B5E20"/>
+  <g fill="#246B29">
+    <rect x="0" y="0" width="18" height="108"/>
+    <rect x="36" y="0" width="18" height="108"/>
+    <rect x="72" y="0" width="18" height="108"/>
+  </g>
+</svg>

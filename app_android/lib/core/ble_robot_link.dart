@@ -132,6 +132,21 @@ class BleRobotLink implements RobotLink {
   final List<ControlCommand> _pendingCommands = [];
   bool _commandWriting = false;
 
+  // Generación de conexión (AUD-12/13/15). Sube al EMPEZAR cada intento de
+  // conexión y al CERRAR cada conexión (desconexión, caída, fallo, dispose).
+  // Toda escritura y todo callback del transporte (bytes, caída) quedan
+  // atados a la generación en que nacieron y se ignoran si cambió: nada de
+  // una conexión vieja toca la nueva.
+  int _generation = 0;
+
+  // Operaciones del transporte (open/close) SERIALIZADAS (AUD-15): un open()
+  // nuevo nunca empieza antes de que termine el close() de la conexión
+  // anterior, y un close() nunca corre en medio de un open() posterior.
+  Future<void> _transportOps = Future.value();
+
+  // connect() en curso: un segundo connect() concurrente recibe el mismo Future.
+  Future<void>? _connectInFlight;
+
   @override
   bool get isSimulated => false;
 
@@ -178,59 +193,114 @@ class BleRobotLink implements RobotLink {
 
   // --- Conexión -------------------------------------------------------------
 
-  @override
-  Future<void> connect() async {
-    if (_disposed || _status != LinkStatus.disconnected) return;
-    final reason = _transport.unavailableReason;
-    if (reason != null) throw BleLinkException(reason);
+  // Ciclo de vida (AUD-15). Invariantes:
+  //   I1  connected ⇒ el último open() del transporte terminó bien y no hubo
+  //       close() después (nunca "connected" con el transporte cerrado).
+  //   I2  disconnected y sin operaciones en curso ⇒ el último evento del
+  //       transporte es close() (o nunca se abrió).
+  //   I3  nada de una generación vieja (escrituras, cola, bytes, caídas) actúa
+  //       sobre la generación vigente.
+  //   I4  los streams nunca reciben eventos después de dispose().
 
+  /// Conecta. Un connect() mientras otro está en curso devuelve el mismo
+  /// Future; si ya está conectado, no hace nada. Si se llama mientras todavía
+  /// se cierra la conexión anterior, espera a que termine ese cierre antes de
+  /// abrir. Si disconnect()/dispose()/una caída lo cancelan, termina sin
+  /// error y sin quedar conectado.
+  @override
+  Future<void> connect() {
+    if (_disposed || _status == LinkStatus.connected) return Future.value();
+    final inFlight = _connectInFlight;
+    if (inFlight != null) return inFlight;
+    final reason = _transport.unavailableReason;
+    if (reason != null) return Future.error(BleLinkException(reason));
+    final f = _connect();
+    _connectInFlight = f;
+    f.then((_) {}, onError: (_) {}).whenComplete(() {
+      if (identical(_connectInFlight, f)) _connectInFlight = null;
+    });
+    return f;
+  }
+
+  Future<void> _connect() async {
+    final gen = ++_generation;
     _setStatus(LinkStatus.connecting);
     _assembler.reset();
-    _rxSub = _transport.received.listen(_onBytes);
-    _lostSub = _transport.linkLost.listen((_) => _onLinkLost());
+    // Callbacks atados a esta generación (I3).
+    _rxSub = _transport.received.listen((b) {
+      if (gen == _generation) _onBytes(b);
+    });
+    _lostSub = _transport.linkLost.listen((_) => _onLinkLost(gen));
     try {
-      await _transport.open();
+      await _serialTransportOp(() async {
+        if (gen != _generation) return; // cancelado antes de abrir: no abre
+        await _transport.open();
+      });
     } catch (_) {
-      if (_status == LinkStatus.connecting) {
-        await _teardown();
-        _setStatus(LinkStatus.disconnected);
-      }
+      if (gen != _generation) return; // lo canceló otro: su cierre ya está encolado
+      await _closeGeneration(abortOpen: false);
       rethrow;
     }
-    if (_status != LinkStatus.connecting) {
-      // disconnect()/dispose() durante la conexión: no se queda conectado.
-      await _transport.close();
-      return;
-    }
+    // Cancelado durante el open(): el close() quedó encolado DETRÁS del open().
+    if (gen != _generation) return;
     _setStatus(LinkStatus.connected);
   }
 
-  void _onLinkLost() {
-    if (_status == LinkStatus.disconnected) return;
+  void _onLinkLost(int gen) {
+    if (gen != _generation || _status == LinkStatus.disconnected) return;
     // Pérdida de enlace: el ESP aplica su timeout de 300 ms por su cuenta.
-    _setStatus(LinkStatus.disconnected);
-    unawaited(_teardown().then((_) => _transport.close()));
+    unawaited(_closeGeneration(abortOpen: _status == LinkStatus.connecting));
   }
 
+  /// Desconecta. Al terminar, el transporte quedó cerrado (I2). Si ya estaba
+  /// desconectado, espera a que termine un cierre todavía en curso.
   @override
-  Future<void> disconnect() async {
-    if (_status == LinkStatus.disconnected) return;
+  Future<void> disconnect() {
+    if (_status == LinkStatus.disconnected) return _transportOps;
+    return _closeGeneration(abortOpen: _status == LinkStatus.connecting);
+  }
+
+  /// Cierra la generación vigente. TODO lo que afecta a la generación nueva se
+  /// hace síncrono, antes de cualquier await (generación, cola, escrituras,
+  /// suscripciones, estado). El close() del transporte va a la cola serial:
+  /// corre después de un open() en curso y antes de cualquier open() nuevo.
+  /// [abortOpen]: hay un open() en curso; además se llama close() ya mismo
+  /// para cancelarlo (contrato de [BleTransport.close]), y el siguiente
+  /// open() espera también a ese cierre.
+  Future<void> _closeGeneration({required bool abortOpen}) {
+    _generation++;
+    _pendingCommands.clear();
+    _commandWriting = false;
+    _writeChain = Future.value(); // la nueva conexión no espera a la vieja
+    _assembler.reset();
+    final rx = _rxSub;
+    final lost = _lostSub;
+    _rxSub = null;
+    _lostSub = null;
+    // Sin await: los callbacks ya están atados a su generación (I3).
+    unawaited(rx?.cancel());
+    unawaited(lost?.cancel());
+    final abort = abortOpen ? _safeClose() : Future<void>.value();
+    final closed = _serialTransportOp(() async {
+      await abort;
+      await _safeClose();
+    });
     _setStatus(LinkStatus.disconnected);
-    await _teardown();
+    return closed;
+  }
+
+  Future<void> _safeClose() async {
     try {
       await _transport.close();
     } catch (e) {
-      debugPrint('BleRobotLink: error al desconectar: $e');
+      debugPrint('BleRobotLink: error al cerrar el transporte: $e');
     }
   }
 
-  Future<void> _teardown() async {
-    _pendingCommands.clear();
-    _assembler.reset();
-    await _rxSub?.cancel();
-    _rxSub = null;
-    await _lostSub?.cancel();
-    _lostSub = null;
+  Future<void> _serialTransportOp(Future<void> Function() op) {
+    final result = _transportOps.then((_) => op());
+    _transportOps = result.then((_) {}, onError: (_) {});
+    return result;
   }
 
   // --- Envío ----------------------------------------------------------------
@@ -241,6 +311,9 @@ class BleRobotLink implements RobotLink {
   /// registran; la caída real la avisa el transporte) y no frenan lo pendiente.
   /// El Future se completa cuando el comando se escribió, quedó pendiente
   /// detrás de la escritura en curso, o no había conexión.
+  /// Lo pendiente vive solo dentro de UNA conexión: al desconectarse o perder
+  /// el enlace se descarta (no hay a quién mandarlo) y nunca sale por la
+  /// conexión siguiente.
   @override
   Future<void> sendCommand(ControlCommand command) async {
     if (!_isUp) return;
@@ -249,6 +322,7 @@ class BleRobotLink implements RobotLink {
       enqueueCommand(_pendingCommands, toSend); // sale al terminar la actual
       return;
     }
+    final gen = _generation;
     _commandWriting = true;
     try {
       while (true) {
@@ -257,11 +331,12 @@ class BleRobotLink implements RobotLink {
         } catch (e) {
           debugPrint('BleRobotLink: fallo al escribir comando seq=${toSend.seq}: $e');
         }
-        if (!_isUp || _pendingCommands.isEmpty) break;
+        // Conexión vieja: no se toca nada de la nueva.
+        if (gen != _generation || !_isUp || _pendingCommands.isEmpty) break;
         toSend = _pendingCommands.removeAt(0);
       }
     } finally {
-      _commandWriting = false;
+      if (gen == _generation) _commandWriting = false;
     }
   }
 
@@ -285,17 +360,24 @@ class BleRobotLink implements RobotLink {
     await _enqueueWrite(EspProtocol.encodeClear());
   }
 
-  /// Serializa las escrituras: los fragmentos de una línea nunca se mezclan
-  /// con los de otra.
+  /// Serializa las escrituras de UNA conexión: los fragmentos de una línea
+  /// nunca se mezclan con los de otra. La línea queda atada a la generación
+  /// en que se encoló.
   Future<void> _enqueueWrite(String line) {
-    final result = _writeChain.then((_) => _writeLine(line));
+    final gen = _generation;
+    final result = _writeChain.then((_) => _writeLine(line, gen));
     _writeChain = result.then((_) {}, onError: (_) {});
     return result;
   }
 
-  Future<void> _writeLine(String line) async {
+  Future<void> _writeLine(String line, int gen) async {
     for (final chunk in chunkLine(utf8.encode(line), _transport.mtu)) {
-      if (!_isUp) return; // se cortó: el ESP descarta la línea incompleta
+      // Se cortó o es de una conexión vieja: no se escribe (el ESP descarta
+      // una línea incompleta al reconectar). Se informa como error para que
+      // sendPolygon/clearPolygon no den por enviado algo que no salió.
+      if (gen != _generation || !_isUp) {
+        throw const BleLinkException('enlace perdido: la línea no se envió');
+      }
       await _transport.write(chunk);
     }
   }
@@ -309,6 +391,8 @@ class BleRobotLink implements RobotLink {
     }
   }
 
+  /// Libera todo. Cancela un connect() en curso, cierra el transporte y
+  /// después los streams (I4). Idempotente.
   @override
   Future<void> dispose() async {
     if (_disposed) return;

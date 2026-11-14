@@ -144,3 +144,27 @@ Este documento condensa el progreso general del proyecto a alto nivel día a dí
 - **micro-ROS agent compilado desde source** (branch `lyrical` del repo oficial). El agente usa un SuperBuild que descarga `microxrcedds_agent` automáticamente. Se resolvió un conflicto con Python 3.12 de `uv` forzando el Python del sistema (`/usr/bin/python3`). Binario operativo en `~/microros_agent_ws/`.
 - Creados `scripts/pi/{env.sh,run_brain.sh,run_agent_serial.sh}` y copiados a la Pi.
 - `CLAUDE.md` y `docs/00_estado_actual.md` actualizados: PC = Jazzy/firmware, Pi 4 = Lyrical/producción.
+
+## 13–14/11/26 — App Android E7 "Gramanova" (APK de prueba con robot simulado)
+
+- **Entorno nuevo en una PC Windows** (no la PC Linux). Todo en `D:\dev\`, con hashes verificados: Flutter 3.47.8 (igual que en Linux), JDK Temurin 17.0.21+9, Android cmdline-tools 23.0, platform-tools 37.0.1, plataforma 36, build-tools 36.0.0 y NDK 28.2.13676358. Las cachés de Gradle y pub también van a `D:\dev`. El entorno se carga por proceso con `D:\dev\env_flutter.ps1`; no se tocó el `JAVA_HOME` del usuario (sigue roto: pendiente del usuario).
+- **Ruta con "é":** `flutter analyze` y `aapt2` fallan en `d:\Moisés\...`. Se trabaja desde la unidad virtual `R:` (`subst`).
+- **Rama `feature/app-android-e7`** con la carpeta nueva `app_android/` (excepción autorizada). Se clonó sin `tools/`.
+- **Organización:** 4 agentes (núcleo, interfaz, entorno/APK y auditor) coordinados. El auditor verifica todo con corridas propias y pruebas de mutación.
+- **Decisiones:**
+  - flutter_blue_plus 2.3.15 tiene licencia propia (gratis para uso educativo y personal): se declara `License.nonprofit` y se **desactiva el envío de datos** que hace en cada compilación (comprobado: tarea `SKIPPED`).
+  - APK de 64 bits para el Samsung Galaxy M12 (Android 13).
+  - App renombrada **Gramanova**, con icono propio v3: robot cortacésped de perfil, sin manija, verde lima sobre césped, adaptativo con monocromo. Aprobado por la usuaria.
+  - El esquema JSON del comando, el formato de `PERR` y el MTU quedan como **PROPUESTA** en `docs/e7_app_android.md` §4–§5.
+- **Seguridad implementada y probada en simulador** (no con BLE real):
+  - heartbeat de 10 Hz;
+  - STOP al apoyar el dedo;
+  - STOP por pérdida de conexión y por pasar a segundo plano;
+  - herramientas bloqueadas (`TOOLS_ENABLED=false`);
+  - corte del ESP simulado con más de 300 ms (300 vale, 301 corta);
+  - cola BLE con prioridad absoluta del STOP.
+- **Auditoría:** 15 hallazgos en 3 rondas, de los cuales 14 están cerrados con evidencia. **AUD-15** (carrera al reconectar BLE, latente) está corregido y falta verificarlo.
+- **CHECKPOINT (detalle en `app_android/AUDITORIA.md`):**
+  - Verificado el 13/11 a las 22:46: analyze sin problemas y 245/245 tests.
+  - Falta: barrido del ciclo de conexión BLE, ronda 4, compilar y verificar la APK arm64, e instalarla en el M12.
+  - Estado de la APK: la APK final **todavía no se compiló**. Hubo un build de verificación el 13/11 a las 21:41, con un estado anterior, que no se instaló. Nada está probado en el teléfono. BLE real sin probar (no hay firmware BLE del ESP).

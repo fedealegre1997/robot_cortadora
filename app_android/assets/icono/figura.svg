@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 108 108" width="108" height="108">
+  <!-- Capa de figura del icono adaptativo (108x108 dp, fondo transparente).
+       Robot cortacesped de perfil, mirando a la izquierda: carcasa baja en cupula,
+       rueda trasera grande y rueda loca delantera chica. Sin manija (es autonomo).
+       Todo (incluido el contorno) entra en un circulo de radio ~32 dp centrado
+       en (54,54); la zona segura del icono adaptativo es de 66 dp (radio 33). -->
+  <g stroke="#0B2410" stroke-width="3.6" stroke-linejoin="round" stroke-linecap="round">
+    <!-- rueda loca delantera (horquilla + rueda) -->
+    <path d="M41 62 L38.5 70" fill="none"/>
+    <circle cx="37.5" cy="71" r="4.8" fill="#34443B"/>
+    <!-- boton de parada arriba -->
+    <ellipse cx="57" cy="40.3" rx="6.5" ry="3.8" fill="#3E8E41"/>
+    <!-- carcasa -->
+    <path d="M25 62 Q25 54 33 49 Q46 40 59 40 Q75 40 80 51 Q83 56 83 61 L83 62 Q83 66 79 66 L29 66 Q25 66 25 62 Z" fill="#B6EB8F"/>
+    <!-- faldon inferior -->
+    <path d="M25 58.5 L83 58.5 L83 62 Q83 66 79 66 L29 66 Q25 66 25 62 Z" fill="#5FA84A"/>
+    <!-- rueda trasera -->
+    <circle cx="68" cy="65.5" r="10" fill="#34443B"/>
+    <circle cx="68" cy="65.5" r="3.8" fill="#C5D3CB" stroke="none"/>
+  </g>
+</svg>

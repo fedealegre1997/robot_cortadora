@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 108 108" width="108" height="108">
+  <!-- Capa monocromatica (iconos tematicos de Android 13+). Android usa solo el
+       canal alfa y la tine con el color del tema. Misma silueta que figura.svg
+       (incluido el grosor del contorno); las ruedas se separan de la carcasa con
+       huecos transparentes hechos con una mascara. -->
+  <defs>
+    <mask id="corte" maskUnits="userSpaceOnUse" x="0" y="0" width="108" height="108">
+      <rect width="108" height="108" fill="#000"/>
+      <g stroke-linejoin="round" stroke-linecap="round">
+        <!-- boton y carcasa (con el grosor del contorno) -->
+        <ellipse cx="57" cy="40.3" rx="6.5" ry="3.8" fill="#fff" stroke="#fff" stroke-width="3.6"/>
+        <path d="M25 62 Q25 54 33 49 Q46 40 59 40 Q75 40 80 51 Q83 56 83 61 L83 62 Q83 66 79 66 L29 66 Q25 66 25 62 Z" fill="#fff" stroke="#fff" stroke-width="3.6"/>
+        <!-- linea del faldon -->
+        <path d="M29 58.5 L52 58.5" fill="none" stroke="#000" stroke-width="2.2"/>
+        <!-- rueda loca: hueco, horquilla y rueda -->
+        <circle cx="37.5" cy="71" r="8.8" fill="#000"/>
+        <path d="M41 62 L38.5 70" fill="none" stroke="#fff" stroke-width="3.6"/>
+        <circle cx="37.5" cy="71" r="6.6" fill="#fff"/>
+        <!-- rueda trasera: hueco, rueda y buje calado -->
+        <circle cx="68" cy="65.5" r="14" fill="#000"/>
+        <circle cx="68" cy="65.5" r="11.8" fill="#fff"/>
+        <circle cx="68" cy="65.5" r="4" fill="#000"/>
+      </g>
+    </mask>
+  </defs>
+  <rect width="108" height="108" fill="#FFFFFF" mask="url(#corte)"/>
+</svg>

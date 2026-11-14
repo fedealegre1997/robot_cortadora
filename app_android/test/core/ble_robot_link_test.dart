@@ -6,6 +6,7 @@ import 'package:cortadora_e7/core/ble_robot_link.dart';
 import 'package:cortadora_e7/core/control_command.dart';
 import 'package:cortadora_e7/core/esp_protocol.dart';
 import 'package:cortadora_e7/core/robot_link.dart';
+import 'package:fake_async/fake_async.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart' show License;
 import 'package:flutter_test/flutter_test.dart';
 
@@ -24,6 +25,10 @@ class FakeTransport implements BleTransport {
 
   /// Fragmentos en el orden en que se entregaron a la "radio".
   final List<List<int>> chunks = [];
+
+  /// Número de conexión (1, 2, …) en que salió cada fragmento de [chunks].
+  final List<int> chunkConnection = [];
+  int connection = 0;
 
   /// Si es true, cada write() queda pendiente hasta [releaseOne]/[releaseAll].
   bool holdWrites = false;
@@ -48,6 +53,7 @@ class FakeTransport implements BleTransport {
   @override
   Future<void> open() async {
     openCalls++;
+    connection++;
     if (openGate != null) await openGate!.future;
   }
 
@@ -57,6 +63,7 @@ class FakeTransport implements BleTransport {
   @override
   Future<void> write(List<int> chunk) async {
     chunks.add(List.of(chunk));
+    chunkConnection.add(connection);
     final err = failNextWrite;
     if (err != null) {
       failNextWrite = null;
@@ -87,6 +94,22 @@ class FakeTransport implements BleTransport {
         for (final l in lines)
           if (l.startsWith('{"t":"CMD"')) ControlCommand.fromJsonLine(l),
       ];
+
+  /// Bytes escritos durante la conexión [conn], tal cual (pueden incluir
+  /// líneas incompletas).
+  String bytesOf(int conn) => utf8.decode([
+        for (var i = 0; i < chunks.length; i++)
+          if (chunkConnection[i] == conn) ...chunks[i],
+      ], allowMalformed: true);
+
+  /// Comandos completos escritos durante la conexión [conn].
+  List<ControlCommand> commandsOf(int conn) {
+    final parts = bytesOf(conn).split('\n');
+    return [
+      for (final l in parts.sublist(0, parts.length - 1))
+        if (l.startsWith('{"t":"CMD"')) ControlCommand.fromJsonLine(l),
+    ];
+  }
 }
 
 /// Vacía la cola de eventos (microtareas + timers de 0).
@@ -176,10 +199,15 @@ void main() {
       final f = link.connect();
       await settle();
       expect(link.status, LinkStatus.connecting);
-      await link.disconnect();
+      // disconnect() espera a que el transporte quede cerrado; ese cierre va
+      // DETRÁS del open() en curso (AUD-15), así que se libera el open().
+      final d = link.disconnect();
+      expect(link.status, LinkStatus.disconnected);
       t.openGate!.complete();
+      await d;
       await f;
       expect(link.status, LinkStatus.disconnected);
+      expect(t.closeCalls, greaterThanOrEqualTo(1), reason: 'cerrado después del open');
       await link.sendCommand(manual(1));
       expect(t.chunks, isEmpty);
     });
@@ -437,6 +465,129 @@ void main() {
       }
       expect(t.commands.map((c) => c.seq),
           [65530, 65531, 65532, 65533, 65534, 65535, 0, 1, 2, 3, 4, 5]);
+    });
+  });
+
+  group('reconexión: generación de conexión (AUD-12/13)', () {
+    test('un comando encolado detrás de un POLY retenido no sale por la conexión nueva',
+        () async {
+      final (link, t) = await connected(toolsOff);
+      t.holdWrites = true;
+      final poly = link.sendPolygon(1, square);
+      await settle();
+      unawaited(link.sendCommand(manual(7))); // detrás del POLY
+      await settle();
+      t.loseLink();
+      await settle();
+      expect(link.status, LinkStatus.disconnected);
+      await link.connect(); // conexión 2
+      expect(link.status, LinkStatus.connected);
+      t.holdWrites = false;
+      await drain(t); // la radio "termina" la escritura vieja
+      await expectLater(poly, completes, reason: 'el POLY ya había salido entero');
+      await link.sendCommand(ControlCommand.safeStop(8));
+      await settle();
+      expect(t.commandsOf(2).map((c) => c.seq), [8]);
+      expect(t.bytesOf(2), isNot(contains('"seq":7')));
+    });
+
+    test('lo que quedó pendiente (STOP incluido) se descarta con la conexión vieja', () async {
+      final (link, t) = await connected(toolsOff);
+      t.holdWrites = true;
+      unawaited(link.sendCommand(manual(1)));
+      await settle();
+      await link.sendCommand(ControlCommand.safeStop(2)); // pendiente
+      await link.sendCommand(manual(3)); // pendiente detrás del STOP
+      t.loseLink();
+      await settle();
+      await link.connect();
+      t.holdWrites = false;
+      await drain(t);
+      await link.sendCommand(manual(4));
+      await settle();
+      expect(t.commandsOf(1).map((c) => c.seq), [1]);
+      expect(t.commandsOf(2).map((c) => c.seq), [4]);
+    });
+
+    test('una línea de la conexión vieja a medio escribir no sigue en la nueva', () async {
+      final (link, t) = await connected(toolsOff, mtu: 23);
+      t.holdWrites = true;
+      unawaited(link.sendPolygon(1, square).catchError((_) {}));
+      await settle();
+      expect(t.chunks, hasLength(1)); // primer fragmento en vuelo
+      t.loseLink();
+      await settle();
+      await link.connect();
+      t.holdWrites = false;
+      await drain(t);
+      expect(t.bytesOf(2), isEmpty, reason: 'ningún fragmento del POLY viejo');
+    });
+
+    test('sendPolygon cortado por la caída informa error (no da por enviado)', () async {
+      final (link, t) = await connected(toolsOff, mtu: 23);
+      t.holdWrites = true;
+      final poly = link.sendPolygon(1, square);
+      final check = expectLater(poly, throwsA(isA<BleLinkException>()));
+      await settle();
+      t.loseLink();
+      await settle();
+      t.holdWrites = false;
+      await drain(t);
+      await check;
+    });
+
+    test('una escritura colgada de la conexión vieja no bloquea el STOP de la nueva', () {
+      fakeAsync((async) {
+        final t = FakeTransport();
+        final link = BleRobotLink.withTransport(toolsOff, t);
+        link.connect();
+        async.flushMicrotasks();
+        t.holdWrites = true;
+        link.sendCommand(manual(1)); // la radio no responde nunca
+        async.flushMicrotasks();
+        link.sendCommand(manual(2)); // pendiente
+        t.loseLink();
+        async.flushMicrotasks();
+        link.connect();
+        async.flushMicrotasks();
+        t.holdWrites = false;
+        final t0 = async.elapsed;
+        link.sendCommand(ControlCommand.safeStop(3));
+        async.flushMicrotasks();
+        expect(async.elapsed - t0, Duration.zero);
+        expect(t.commandsOf(2).map((c) => c.seq), [3], reason: 'STOP inmediato');
+        // y los siguientes también salen, sin esperar a la escritura vieja
+        link.sendCommand(manual(4));
+        async.elapse(const Duration(milliseconds: 100));
+        expect(t.commandsOf(2).map((c) => c.seq), [3, 4]);
+        // cuando la vieja por fin termina, no escribe nada más ni rompe la cola
+        t.releaseOne();
+        async.flushMicrotasks();
+        link.sendCommand(manual(5));
+        async.flushMicrotasks();
+        expect(t.commandsOf(2).map((c) => c.seq), [3, 4, 5]);
+        expect(t.commandsOf(1).map((c) => c.seq), [1]);
+      });
+    });
+
+    test('las 4 condiciones de AUD-06 siguen valiendo en la conexión nueva', () async {
+      final (link, t) = await connected(toolsOff);
+      t.loseLink();
+      await settle();
+      await link.connect();
+      t.holdWrites = true;
+      unawaited(link.sendCommand(manual(1)));
+      await settle();
+      await link.sendCommand(manual(2));
+      await link.sendCommand(ControlCommand.safeStop(3)); // (1)(2)
+      await link.sendCommand(manual(4)); // (4)
+      await link.sendCommand(manual(5)); // (3)
+      await drain(t);
+      expect(t.commandsOf(2).map((c) => (c.seq, c.state)), [
+        (1, RobotState.manual),
+        (3, RobotState.stop),
+        (5, RobotState.manual),
+      ]);
     });
   });
 

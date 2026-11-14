@@ -1,4 +1,4 @@
-// App E7 Robot Cortadora — APK de prueba (robot simulado por defecto).
+// App Gramanova (E7, robot cortadora) — APK de prueba (robot simulado por defecto).
 
 import 'package:flutter/widgets.dart';
 

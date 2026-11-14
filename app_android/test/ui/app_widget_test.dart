@@ -161,23 +161,41 @@ void main() {
   });
 
   testWidgets('el botón STOP pide STOP de inmediato', (tester) async {
-    final (link, c) = await pumpApp(tester);
+    // Herramientas habilitadas a propósito: así el STOP tiene que bajar
+    // cutter/trimmer que antes estaban en 1 (si no, el 0 sería trivial).
+    final (link, c) = await pumpApp(tester, toolsEnabled: true);
     await tester.tap(find.byKey(ConnectionScreen.connectKey));
     await tester.pump();
     await goToControl(tester);
     await tester.tap(find.byKey(ControlScreen.stateKey(RobotState.manual)));
     await tester.pump();
-    expect(c.state, RobotState.manual);
+    c.setSpeed(70);
+    c.setCutter(true);
+    c.setTrimmer(true);
+    c.pressDirection(Direction.forward);
+    await tester.pump(const Duration(milliseconds: 100));
+    final before = link.sent.last;
+    expect(before.state, RobotState.manual);
+    expect(before.dir, Direction.forward);
+    expect(before.speed, 70);
+    expect(before.cutter, 1);
+    expect(before.trimmer, 1);
 
     final n = link.sent.length;
     await tester.tap(find.byKey(StopButton.buttonKey));
     await tester.pump();
     expect(c.state, RobotState.stop);
-    // Al apoyar (AUD-02) y al levantar (onPressed): 1 o 2 STOP inmediatos.
-    expect(link.sent.length - n, inInclusiveRange(1, 2));
-    expect(link.sent.skip(n).map((e) => e.state),
-        everyElement(RobotState.stop));
-    expect(link.sent.last.state, RobotState.stop);
+    // Al apoyar (AUD-02) y al levantar (onPressed): 1 o 2 STOP inmediatos,
+    // y CADA uno con los 5 campos en seguro.
+    final stops = link.sent.skip(n).toList();
+    expect(stops.length, inInclusiveRange(1, 2));
+    for (final cmd in stops) {
+      expect(cmd.state, RobotState.stop, reason: 'state de $cmd');
+      expect(cmd.dir, Direction.none, reason: 'dir de $cmd');
+      expect(cmd.speed, 0, reason: 'speed de $cmd');
+      expect(cmd.cutter, 0, reason: 'cutter de $cmd');
+      expect(cmd.trimmer, 0, reason: 'trimmer de $cmd');
+    }
     await unmount(tester);
   });
 

@@ -27,10 +27,13 @@ class SimulatedRobotLink implements RobotLink {
   /// 10 Hz y no debe crecer sin límite).
   static const int historyLimit = 200;
 
-  /// Antigüedad a partir de la cual el ESP simulado corta: la primera que es
-  /// estrictamente MAYOR que [AppConfig.espCommandTimeout] (resolución 1 µs).
-  static final Duration espStaleAfter =
-      AppConfig.espCommandTimeout + const Duration(microseconds: 1);
+  /// Timer de RESPALDO del corte (AUD-11). El corte se decide al consultar,
+  /// con la antigüedad medida por [monotonicClock] (> 300 ms → corta). Este
+  /// timer solo hace falta cuando el reloj no avanza con el tiempo falso
+  /// (tests con fake_async y el `Stopwatch` por defecto). Son 301 ms ENTEROS:
+  /// la VM trunca los timers a milisegundos (y redondea hacia abajo el
+  /// instante de creación), así que nunca dispara con antigüedad ≤ 300 ms.
+  static const Duration espStaleTimerDelay = Duration(milliseconds: 301);
 
   final AppConfig config;
 
@@ -40,11 +43,22 @@ class SimulatedRobotLink implements RobotLink {
   /// Período del GPS de prueba (~1 Hz).
   final Duration gpsPeriod;
 
+  /// Reloj monotónico (tiempo transcurrido desde un origen arbitrario) para
+  /// medir la antigüedad del último comando. Por defecto, un `Stopwatch` real
+  /// (resolución de µs). Los tests pueden inyectar el tiempo falso.
+  final Duration Function() monotonicClock;
+
   SimulatedRobotLink(
     this.config, {
     this.connectDelay = const Duration(milliseconds: 500),
     this.gpsPeriod = const Duration(seconds: 1),
-  });
+    Duration Function()? monotonicClock,
+  }) : monotonicClock = monotonicClock ?? _stopwatchClock();
+
+  static Duration Function() _stopwatchClock() {
+    final sw = Stopwatch()..start();
+    return () => sw.elapsed;
+  }
 
   final _statusCtrl = StreamController<LinkStatus>.broadcast();
   final _msgCtrl = StreamController<RobotMessage>.broadcast();
@@ -60,8 +74,16 @@ class SimulatedRobotLink implements RobotLink {
   ControlCommand? _lastReceived;
   String? _lastLine;
   int _receivedCount = 0;
-  bool _espCommandFresh = false;
+  Duration? _lastReceivedAt; // según monotonicClock
+  bool _espStaleTimerFired = false;
   int _espPolygonId = 0;
+
+  /// Antigüedad del último comando ≤ 300 ms (contrato: corta con MÁS de 300).
+  bool get _espCommandFresh {
+    final at = _lastReceivedAt;
+    if (at == null || _espStaleTimerFired) return false;
+    return monotonicClock() - at <= AppConfig.espCommandTimeout;
+  }
 
   @override
   bool get isSimulated => true;
@@ -96,8 +118,10 @@ class SimulatedRobotLink implements RobotLink {
   /// Lo que el ESP simulado publicaría en los índices 16–21 de /sensores tras
   /// su recorte de seguridad (contrato: sin conexión o último comando con
   /// MÁS de 300 ms) → dir, cutter y trimmer en 0. Con 300 ms justos todavía no
-  /// corta; con 300 ms + 1 µs sí. state, speed y seq se conservan. null si
-  /// nunca llegó un comando.
+  /// corta; con más, sí. La antigüedad se calcula AL CONSULTAR con
+  /// [monotonicClock] (resolución de µs con el Stopwatch por defecto), sin
+  /// depender de la resolución de los timers. state, speed y seq se
+  /// conservan. null si nunca llegó un comando.
   ControlCommand? get espPublishedCommand {
     final last = _lastReceived;
     if (last == null) return null;
@@ -134,7 +158,7 @@ class SimulatedRobotLink implements RobotLink {
     _gpsTimer = null;
     _espStaleTimer?.cancel();
     _espStaleTimer = null;
-    _espCommandFresh = false;
+    _lastReceivedAt = null; // el comando viejo ya no es "reciente"
     _setStatus(LinkStatus.disconnected);
   }
 
@@ -185,12 +209,13 @@ class SimulatedRobotLink implements RobotLink {
     _history.add(cmd);
     if (_history.length > historyLimit) _history.removeAt(0);
 
-    _espCommandFresh = true;
+    // "Más de 300 ms" (AUD-01/AUD-11): se guarda el instante y la antigüedad
+    // se evalúa al consultar (ver _espCommandFresh). El timer es solo respaldo.
+    _lastReceivedAt = monotonicClock();
+    _espStaleTimerFired = false;
     _espStaleTimer?.cancel();
-    // "Más de 300 ms": el timer vence 1 µs DESPUÉS del límite, así a 300 ms
-    // exactos el comando sigue vigente (AUD-01).
-    _espStaleTimer = Timer(espStaleAfter, () {
-      _espCommandFresh = false;
+    _espStaleTimer = Timer(espStaleTimerDelay, () {
+      _espStaleTimerFired = true;
     });
 
     // ACK de RECEPCIÓN (no de ejecución), pasando por el codec como el real.

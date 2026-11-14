@@ -286,16 +286,50 @@ void main() {
       });
     });
 
-    test('el corte ocurre apenas se supera el límite (300 ms + 1 µs)', () {
-    fakeAsync((async) {
-      final h = Harness(async, toolsOn);
-      h.link.sendCommand(fullCmd(1));
-      async.elapse(AppConfig.espCommandTimeout);
-      expect(h.link.espPublishedCommand, fullCmd(1));
-      async.elapse(const Duration(microseconds: 1));
-      expect(h.link.espPublishedCommand!.dir, Direction.none);
+    test('AUD-11: la antigüedad se evalúa al consultar (reloj inyectado, µs), '
+        'sin depender del timer', () {
+      fakeAsync((async) {
+        final link = SimulatedRobotLink(toolsOn,
+            connectDelay: Duration.zero, monotonicClock: () => async.elapsed);
+        link.connect();
+        async.elapse(Duration.zero);
+        expect(link.status, LinkStatus.connected);
+        link.sendCommand(fullCmd(1));
+        async.elapse(AppConfig.espCommandTimeout);
+        expect(link.espPublishedCommand, fullCmd(1), reason: '300 ms justos: vigente');
+        // 300 ms + 1 µs: el timer de respaldo (301 ms) todavía no disparó, pero
+        // la consulta ya ve la antigüedad > 300 ms y corta.
+        async.elapse(const Duration(microseconds: 1));
+        expect(link.espPublishedCommand!.dir, Direction.none);
+        expect(link.espPublishedCommand!.cutter, 0);
+      });
     });
-  });
+
+    test('AUD-11: el timer de respaldo es de 301 ms enteros (la VM trunca a ms)', () {
+      expect(SimulatedRobotLink.espStaleTimerDelay, const Duration(milliseconds: 301));
+      expect(SimulatedRobotLink.espStaleTimerDelay.inMicroseconds % 1000, 0);
+    });
+
+    test('reloj real por defecto: un comando recién recibido está vigente', () async {
+      final link = SimulatedRobotLink(toolsOn, connectDelay: Duration.zero);
+      await link.connect();
+      await link.sendCommand(fullCmd(1));
+      expect(link.espPublishedCommand, fullCmd(1));
+      await link.dispose();
+    });
+
+    test('tras una pérdida y reconexión, el comando viejo ya no es vigente', () {
+      fakeAsync((async) {
+        final h = Harness(async, toolsOn);
+        h.link.sendCommand(fullCmd(1));
+        async.flushMicrotasks();
+        h.link.simulateLinkLoss();
+        h.link.connect();
+        async.elapse(const Duration(milliseconds: 50));
+        expect(h.link.status, LinkStatus.connected);
+        expect(h.link.espPublishedCommand!.dir, Direction.none);
+      });
+    });
 
   test('se puede reconectar después de una pérdida', () {
       fakeAsync((async) {

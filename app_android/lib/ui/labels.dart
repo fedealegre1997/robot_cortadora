@@ -5,7 +5,7 @@ import '../core/control_command.dart';
 import '../core/robot_link.dart';
 
 abstract final class Labels {
-  static const appTitle = 'Robot Cortadora E7';
+  static const appTitle = 'Gramanova';
   static const simulatedBanner = 'MODO SIMULADO';
   static const simulatedBannerDetail =
       'Sin robot real: los comandos van al simulador.';

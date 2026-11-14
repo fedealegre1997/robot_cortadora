@@ -1,0 +1,18 @@
+# Configuracion de flutter_launcher_icons 0.14.4 (licencia MIT) para el icono de la app.
+# Se usa en un proyecto Flutter DESCARTABLE (D:\dev\_iconos\gen), no en app_android:
+# asi no se agrega ninguna dependencia a nuestro pubspec. Ver README.md de esta carpeta.
+# Las rutas son relativas al proyecto descartable (copiar ahi los PNG a icono\).
+flutter_launcher_icons:
+  android: true
+  ios: false
+  min_sdk_android: 24
+  # Icono heredado (Android 7 y anterior): fondo + figura ya compuestos.
+  image_path: "icono/legado_1024.png"
+  # Icono adaptativo (Android 8+), capas de 108x108 dp.
+  adaptive_icon_background: "icono/fondo_1024.png"
+  adaptive_icon_foreground: "icono/figura_1024.png"
+  # El dibujo ya respeta la zona segura (circulo de 66 dp): sin margen extra
+  # (el default de la herramienta es 16% y achicaria la figura).
+  adaptive_icon_foreground_inset: 0
+  # Iconos tematicos (Android 13+).
+  adaptive_icon_monochrome: "icono/monocromo_1024.png"
