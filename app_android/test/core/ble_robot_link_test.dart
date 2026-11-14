@@ -474,6 +474,9 @@ void main() {
       final (link, t) = await connected(toolsOff);
       t.holdWrites = true;
       final poly = link.sendPolygon(1, square);
+      // La escritura del POLY quedó en la radio sin confirmar cuando se cayó
+      // el enlace: se informa error (no se sabe si llegó; defecto D2).
+      final polyCheck = expectLater(poly, throwsA(isA<BleLinkException>()));
       await settle();
       unawaited(link.sendCommand(manual(7))); // detrás del POLY
       await settle();
@@ -484,7 +487,7 @@ void main() {
       expect(link.status, LinkStatus.connected);
       t.holdWrites = false;
       await drain(t); // la radio "termina" la escritura vieja
-      await expectLater(poly, completes, reason: 'el POLY ya había salido entero');
+      await polyCheck;
       await link.sendCommand(ControlCommand.safeStop(8));
       await settle();
       expect(t.commandsOf(2).map((c) => c.seq), [8]);

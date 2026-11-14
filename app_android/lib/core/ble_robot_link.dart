@@ -147,6 +147,11 @@ class BleRobotLink implements RobotLink {
   // connect() en curso: un segundo connect() concurrente recibe el mismo Future.
   Future<void>? _connectInFlight;
 
+  // Se completa al cerrar la conexión vigente (y se reemplaza). Una escritura
+  // colgada en la radio deja de bloquear a quien la espera en cuanto su
+  // conexión se cierra (defecto D2 del barrido).
+  Completer<void> _connectionClosed = Completer<void>();
+
   @override
   bool get isSimulated => false;
 
@@ -210,8 +215,11 @@ class BleRobotLink implements RobotLink {
   @override
   Future<void> connect() {
     if (_disposed || _status == LinkStatus.connected) return Future.value();
+    // Solo se reutiliza el intento en curso si sigue VIGENTE (connecting). Si
+    // lo cancelaron (disconnect/caída), su Future ya no conecta: un connect()
+    // nuevo arranca otro intento (defecto D1 del barrido).
     final inFlight = _connectInFlight;
-    if (inFlight != null) return inFlight;
+    if (inFlight != null && _status == LinkStatus.connecting) return inFlight;
     final reason = _transport.unavailableReason;
     if (reason != null) return Future.error(BleLinkException(reason));
     final f = _connect();
@@ -272,6 +280,8 @@ class BleRobotLink implements RobotLink {
     _pendingCommands.clear();
     _commandWriting = false;
     _writeChain = Future.value(); // la nueva conexión no espera a la vieja
+    _connectionClosed.complete(); // libera a quien espera escrituras viejas
+    _connectionClosed = Completer<void>();
     _assembler.reset();
     final rx = _rxSub;
     final lost = _lostSub;
@@ -365,12 +375,13 @@ class BleRobotLink implements RobotLink {
   /// en que se encoló.
   Future<void> _enqueueWrite(String line) {
     final gen = _generation;
-    final result = _writeChain.then((_) => _writeLine(line, gen));
+    final closed = _connectionClosed.future;
+    final result = _writeChain.then((_) => _writeLine(line, gen, closed));
     _writeChain = result.then((_) {}, onError: (_) {});
     return result;
   }
 
-  Future<void> _writeLine(String line, int gen) async {
+  Future<void> _writeLine(String line, int gen, Future<void> closed) async {
     for (final chunk in chunkLine(utf8.encode(line), _transport.mtu)) {
       // Se cortó o es de una conexión vieja: no se escribe (el ESP descarta
       // una línea incompleta al reconectar). Se informa como error para que
@@ -378,7 +389,15 @@ class BleRobotLink implements RobotLink {
       if (gen != _generation || !_isUp) {
         throw const BleLinkException('enlace perdido: la línea no se envió');
       }
-      await _transport.write(chunk);
+      // Si la conexión se cierra mientras la radio no responde, no se espera
+      // más (el resultado tardío de esa escritura se ignora, error incluido).
+      final abandoned = await Future.any<bool>([
+        _transport.write(chunk).then((_) => false),
+        closed.then((_) => true),
+      ]);
+      if (abandoned) {
+        throw const BleLinkException('enlace perdido: la línea no se envió');
+      }
     }
   }
 

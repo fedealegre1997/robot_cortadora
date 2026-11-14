@@ -447,3 +447,121 @@ AUD-01, 02, 03, 04, 05, 06, 07, 08, 09 (rondas 1–2); AUD-11, 12, 13, 14 (ronda
 2. Ronda 4 del auditor: AUD-15 + barrido, con corrida propia.
 3. Si queda en verde: commit, APK debug arm64, verificación del auditor sobre la APK (nombre, icono, permisos, AUD-10).
 4. Instalación en el M12 (`adb install -r`) y lista de pruebas manuales para la usuaria.
+
+---
+
+## Ronda 4 — 14/11/26
+
+Base: commit `3874f7a` + cambios sin commitear del Agente 1 (`lib/core/ble_robot_link.dart`, `test/core/ble_robot_link_test.dart`, nuevo `test/core/ble_lifecycle_test.dart`). Todo verificado con corrida propia.
+
+### 1. Mis tests no fueron tocados
+
+```
+git diff --stat 3874f7a -- app_android/test/audit app_android/AUDITORIA.md   → (vacío)
+git status --short → solo  M lib/core/ble_robot_link.dart,  M test/core/ble_robot_link_test.dart,  ?? test/core/ble_lifecycle_test.dart
+```
+Los hashes coinciden con los registrados en las rondas 2 y 3 (prefijos SHA-256): `audit_ble_test.dart` ECA82B4D…, `audit_heartbeat_load_test.dart` 6A8422C9…, `audit_heartbeat_test.dart` B6833ED1…, `audit_helpers.dart` 1434E5EB…, `audit_protocol_test.dart` 8519FB13…, `audit_safety_test.dart` 9ED80665…, `audit_static_test.dart` 1D8C4A65…, `audit_ui_test.dart` 521C518C…. Las aserciones clave de `audit_ble_r3_test.dart` (líneas 314, 316, 335, 344, 346) y de `audit_r3_misc_test.dart` (82, 140) están intactas.
+
+### Corridas literales (desde `R:\app_android`)
+
+```
+R:\app_android> flutter.bat analyze
+Analyzing app_android...
+No issues found! (ran in 3.2s)
+
+R:\app_android> flutter.bat test test/core
+00:01 +120: All tests passed!                       (+120 / −0 / ~0)
+
+R:\app_android> flutter.bat test test/app test/ui test/widget_test.dart
+00:04 +49: All tests passed!
+
+R:\app_android> flutter.bat test test/audit --concurrency=1
+R3 cierre tras caída (syncLost=false): eventos=[open#1, close]
+R3 cierre tras caída (syncLost=true): eventos=[open#1, close]
+R3 reconexión desde el aviso: estado=connected eventos=[open#1, close, open#2] escucha linkLost=true
+R3 carrera forzada: estado=connected eventos=[open#1, close, open#2] escucha linkLost=true
+A2 con carga + press/release: heartbeat envíos=262 medio=14.6ms máx=20ms | testigo envíos=39 medio=99.3ms máx=107ms | carga 89 % (tareas=446)
+A2 solo heartbeat con carga: heartbeat envíos=39 medio=99.3ms máx=107ms | testigo envíos=39 medio=99.3ms máx=107ms | carga 90 % (tareas=450)
+A2 bloqueo 400 ms: envíos=10 medio=133.1ms máx=450ms gaps=[100, 99, 100, 101, 450, 48, 100, 101, 99]
+R3 borde reloj real: consultas vigentes=100 cortadas=110
+R3 timer de respaldo: disparos medidos en µs (cota inferior de la edad real) mín=301237 máx=303147
+R4 primer comando: stop a 108 ms del open()
+R4 caracterización 2: primer comando con MANUAL+adelante+cortadora pedidos en < 100 ms = ControlCommand(state: manual, dir: forward, speed: 30, cutter: 1, trimmer: 0, seq: 0)
+R4 caracterización: primer comando con MANUAL pedido enseguida = ControlCommand(state: manual, dir: none, speed: 30, cutter: 0, trimmer: 0, seq: 0)
+00:37 +101: All tests passed!
+
+R:\app_android> flutter.bat test --concurrency=1
+00:54 +270: All tests passed!
+```
+
+270 = 120 (Agente 1) + 49 (Agente 2) + 101 (auditor: 96 de antes + 5 nuevos de esta ronda). El "265/265" del Agente 1 es 120 + 49 + 96, sin mis 5 nuevos: coincide.
+
+### Estado de los hallazgos
+
+| ID | Estado | Evidencia |
+|---|---|---|
+| AUD-15 | **CERRADO** | Mis dos tests `CARRERA` (async real, sin tocar desde la Ronda 3) en verde. El orden de eventos ahora es `[open#1, close, open#2]` (antes `[open#1, open#2, close]`): el `close()` viejo termina ANTES del `open()` nuevo, y la conexión nueva queda escuchando `linkLost` y detecta su propia caída. Mecanismo revisado en el código: `_serialTransportOp` (una sola cola para open/close), generación que sube al conectar y al cerrar, y `_closeGeneration` que suelta las suscripciones y pasa a `disconnected` de forma síncrona, antes de cualquier `await`. |
+| AUD-06 (4 condiciones) | **sigue en verde** | `audit_ble_test.dart` (condiciones 1–4, propiedad con 2000 secuencias) y la propiedad multi-conexión de `audit_ble_r3_test.dart` (1500 secuencias): verdes. |
+| AUD-12 / AUD-13 | **siguen en verde** | Mismos tests de la Ronda 2 sin tocar, más los de la Ronda 3: verdes. |
+| AUD-10 | ABIERTO (espera la APK nueva) | Sin cambios. |
+| AUD-16 | Aceptado por el coordinador (CHECKPOINT) | Mis tests de reloj real siguen verdes (timer de respaldo ≥ 301,237 ms). |
+
+### Barrido del ciclo de vida (C1–C20, `test/core/ble_lifecycle_test.dart`)
+
+Leí los 20 tests y el transporte falso. **Son reales:** async real (`pumpEventQueue`, sin fake_async); un transporte que cumple el contrato (`close()` cancela un `open()` en curso, compuertas para colgar `open`/`close`/escrituras, caída síncrona o asíncrona) y registra violaciones (open con un close en curso, write con el transporte cerrado); `expectConsistent` verifica I1 (connected ⇒ abierto, disconnected ⇒ cerrado), I6 (escuchas 1/1 o 0/0), "nunca queda en connecting en reposo" y la lista de violaciones; `expectStopFast` verifica I4 (STOP < 300 ms). Cada combinación arma de verdad su escenario (C3 cuelga el close y conecta encima; C6 desconecta durante el open y reconecta; C9 doble pérdida con close colgado; C11 30 reconexiones inmediatas, desde el aviso y directas; C14/C15 escrituras colgadas; C16 llamadas después de dispose; C19 open que falla; C20 50 ciclos).
+
+**Prueba de mutación** (protocolo: copia en `D:\dev\_mutacion\ble_robot_link.dart.r4.orig`, hash, restaurar; como el archivo tiene cambios del Agente 1 sin commitear, el criterio fue "hash idéntico al de antes de mutar" y "`git diff -- app_android/lib` idéntico al de antes de mutar").
+
+```
+antes: ble_robot_link.dart = A9D09D04AE5C4118923507011A45EFEC7FFC6450E367F990C83389B628446A42
+       git diff -- app_android/lib → 71 líneas, sha 37E24A3F74DA6A81CB5BECCDE2B7158AB375BBE04C01BEB484F7E21B09362720
+```
+
+- **Mutante D** (revierte D1: `if (inFlight != null) return inFlight;`):
+  ```
+  C6 disconnect durante open() y connect() inmediato: el nuevo SÍ conecta [E]
+    Expected: LinkStatus:<LinkStatus.connected>
+      Actual: LinkStatus:<LinkStatus.disconnected>
+    el connect() nuevo no puede devolver el intento cancelado [open#1, close, open#1 cancelado, close]
+  00:05 +38 -1: Some tests failed.
+  ```
+  **Detectado por C6.** Restaurado: hash `A9D09D04…6A42 igual=True`.
+- **Mutante E** (revierte D2: `await _transport.write(chunk);` sin competir contra "conexión cerrada"):
+  ```
+  C14 dispose con escrituras COLGADAS: sendCommand completa y sendPolygon falla en seguida [E]
+    Expected: 'ok'   Actual: 'colgado'   sendCommand quedó esperando a la radio
+  C15 disconnect con escritura colgada: los Futures completan y la reconexión manda STOP en < 300 ms [E]
+    Expected: <Instance of 'BleLinkException'>   Actual: 'colgado'
+  00:06 +37 -2: Some tests failed.
+  ```
+  **Detectado por C14 y C15.**
+
+```
+después: ble_robot_link.dart = A9D09D04AE5C4118923507011A45EFEC7FFC6450E367F990C83389B628446A42  igual_antes=True
+         git diff -- app_android/lib → sha 37E24A3F74DA6A81CB5BECCDE2B7158AB375BBE04C01BEB484F7E21B09362720  igual_antes=True
+         fc lib_diff_r4_antes.txt lib_diff_r4_despues.txt → "FC: no se han encontrado diferencias"
+```
+Con el código restaurado, la suite completa da `+270: All tests passed!` (arriba).
+
+### Test del Agente 1 modificado (POLY sin confirmar cuando cae el enlace → error)
+
+`test/core/ble_robot_link_test.dart:474-490`: antes exigía que el POLY "completara"; ahora exige `BleLinkException`. **Es correcto y no esconde nada.** La escritura estaba en la radio SIN confirmar cuando se cayó el enlace: no se sabe si llegó al ESP, y decir "completó" afirmaba algo que no se sabe. La verdad del área la da solo el POK del ESP. Además, el mismo test sigue exigiendo lo importante: nada de antes de la caída sale por la conexión nueva (`expect(t.commands(2).map((c) => c.seq), [8])`). Con D2, un error tardío de la radio se ignora sin dejar errores sin manejar (C14 completa las escrituras colgadas con error y no hay excepciones).
+
+### Limitación declarada: lo pedido durante `connecting` no se transmite
+
+Evaluado contra el `SessionController` real del Agente 2 sobre `BleRobotLink`, con async y reloj reales (`test/audit/audit_r4_first_command_test.dart`, nuevo):
+- Primera conexión sin tocar nada: lo primero que sale es **STOP completo**, a 108 ms del `open()` (primer tick del heartbeat).
+- 5 caídas con MANUAL + adelante + 90 % + cortadora + bordeadora pedidos: en cada conexión nueva lo primero que sale es **STOP completo**. Nada se arrastra (el controlador vuelve a STOP al perder y al recuperar el enlace).
+- Durante `connecting`, el controlador ignora los pedidos y el enlace no escribe nada (`writes` vacío); al conectar, el primer comando es STOP.
+- **¿Puede salir algo distinto de STOP como primer comando?** Sí, pero SOLO si el usuario lo pide explícitamente antes del primer tick (100 ms después de conectar): pedir MANUAL + cortadora + mantener adelante en ese lapso hace salir `manual/forward/cutter 1` primero (caracterización). Hacerlo a mano requiere al menos 3 gestos (y un cambio de pestaña) en 100 ms; no es un arrastre, es el pedido del usuario. **No lo registro como hallazgo.** Sugerencia opcional para el Agente 2: enviar un STOP inmediato al pasar a `connected`, así el primer comando es STOP siempre.
+
+### Hallazgos nuevos
+
+Ninguno. **Ningún hallazgo de seguridad reapareció** (STOP, heartbeat y herramientas, con todos sus tests en verde: 270/270).
+
+### Mis tests en esta ronda
+- `audit_r4_first_command_test.dart` (nuevo, 5 tests, async y reloj reales). Error mío corregido: la primera versión pedía MANUAL + adelante a los 30 ms de conectar, antes del primer tick, y medía su propio pedido en lugar de un arrastre. Ahora pide a los 150 ms, y el caso "antes del primer tick" quedó como caracterización aparte.
+- Ninguno de mis tests anteriores fue modificado.
+
+### Resultado de la ronda
+**EN VERDE.** El único hallazgo abierto es AUD-10 (BAJA), que espera la APK nueva. Sigue lo que pide el CHECKPOINT: commit, APK debug arm64 y verificación del auditor sobre la APK (label "Gramanova", icono adaptativo v3 con fondo, figura y monocromo en `mipmap-anydpi-v26`, permisos y AUD-10).
