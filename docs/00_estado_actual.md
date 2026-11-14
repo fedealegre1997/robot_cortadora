@@ -36,9 +36,34 @@
   - Compilar con `scripts/pc/build_motor.sh esp32|esp32s3`. `sdkconfig.defaults` con `CONFIG_FREERTOS_HZ=1000` (obligatorio para el IMU).
 - **v3.2 (encoders, motores viejos):** respaldada en `firmware/esp32_motor/versions/2026_11_02_MainV3.2_encoders.c.bak` (+ `sdkconfig` del S3). Validada en piso con carga el 03/06/26 y PIVOT el 08/06/26.
 
+### 📱 App Android E7 — "Gramanova" (APK de prueba 1, robot simulado)
+- **Estado:** ✅ **probada en simulador** (tests: 270/270, `flutter analyze` sin problemas, auditada en 4 rondas + ronda de la APK). ✅ **Instalada** en el Samsung Galaxy M12 (SM-M127F, Android 13) el 14/11/26 a las 03:15. La app arrancó sin errores en logcat, pero el teléfono estaba bloqueado y **todavía no hay prueba manual en el teléfono**. ⬜ **BLE real sin probar:** falta el firmware BLE del ESP.
+- **Código:** `app_android/` (Flutter 3.47.8), rama `feature/app-android-e7` (sin push). APK: `entregas/gramanova_debug_arm64_2026-11-14.apk` (debug, solo arm64, 78 MB, SHA-256 en `.sha256`; la carpeta `entregas/` está fuera del repo).
+- **Incluye:**
+  - conexión al robot simulado;
+  - control manual (dirección, velocidad, giro por pulsos o mantenido);
+  - selector STOP / MANUAL / AUTO_RUN / AUTO_PAUSE;
+  - heartbeat de 10 Hz;
+  - STOP al apoyar el dedo;
+  - STOP al perder la conexión o pasar a segundo plano;
+  - herramientas **bloqueadas** (`TOOLS_ENABLED=false`);
+  - banner MODO SIMULADO.
+- **No incluye:** mapa, editor de área (fase 6) ni conexión BLE real; la opción BLE está deshabilitada en la UI.
+- **Protocolo BLE:** el esquema JSON del comando, el formato de `PERR` y el MTU están como **PROPUESTA** en `e7_app_android.md` §4–§5, a congelar con el firmware del ESP. Los UUID BLE están **pendientes**.
+- **Entorno (PC Windows):**
+  - Herramientas en `D:\dev`. Se carga con `D:\dev\env_flutter.ps1` y se trabaja desde `R:` (`subst`), por la "é" de la ruta.
+  - Auditoría completa en `app_android/AUDITORIA.md`.
+  - flutter_blue_plus con `License.nonprofit` (uso educativo) y el envío de datos de compilación desactivado.
+
 ---
 
 ## 2. Bloqueos Actuales o Advertencias
+
+- **Pendientes anotados el 13/11/26 (no bloquean la app):**
+  - (a) Confirmar si el disco de la PC Linux tiene cambios sin subir respecto de `main` en GitHub.
+  - (b) Sensor **v7.0**: el código ya está portado al ESP32-S3 con transporte micro-ROS por USB nativo, pero este documento lo da como v6.2 sobre el ESP32 clásico. Falta confirmar si se compiló o flasheó, y si vale el USB nativo o el conector COM.
+  - (c) Confirmar si el intercambio físico de ESP32 ya se hizo.
+  - (d) En la PC Windows, la variable de usuario `JAVA_HOME` apunta a una carpeta inexistente: la arregla el usuario.
 
 - **Motores de tracción sin encoder → firmware v4.0 (02/11/26):** rumbo y giros en lazo cerrado con el giróscopo de la **placa 3** (el LSM9DS1 quedó de respaldo); velocidad y distancias en lazo abierto. ⚠️ Mientras no se calibren `PWM_ARRANQUE` y `CM_S_POR_PWM` en piso, las velocidades en cm/s y las distancias del PIVOT son estimadas. El **MPU-6500 se queda en el ESP32 sensor** como verificación para la Raspberry.
 - **Hardware y alimentación:** árbol de alimentación documentado en `docs/componentes.md` §3 (banco 8S para la cortadora y el LM2596; batería inferior 4S para la tracción y la bordeadora; powerbank para el procesamiento). ⛔ **El LSM9DS1 (SparkFun Breakout, 1,9–3,6 V, sin regulador) NO va a la línea de 5 V: se alimenta del 3V3 del ESP32.** Resuelto: los ECHO de los HC-SR04 tienen divisor a 3,3 V. Decidido: limitar el PWM de la tracción a ≈180/255. Acordado: medir el consumo USB de la Pi 5 y monitorear cada batería. Riesgo asumido por el equipo: capacitores del LM2596 con 33,6 V.
@@ -128,8 +153,8 @@ Diseño completo, protocolo y decisiones en **[`docs/e7_app_android.md`](e7_app_
 2. Bluetooth básico en el ESP sensor (GPS en JSON + ACK), probado con la app nRF Connect. **Desbloqueado (02/11/26): BLE** (NimBLE recomendado). Requiere portar antes el sensor al S3.
 3. ESP: comandos hacia los índices 15–23, recepción del polígono y topic `/app/working_area`.
 4. Raspberry: Brain al protocolo de 5 campos + estados/watchdog + nodo nuevo `working_area_node`.
-5. Flutter: conexión BT y control manual.
-6. Flutter: mapa offline (`flutter_map`, tiles z19–20) y editor de área.
-7. Integración y APK final.
+5. Flutter: conexión BT y control manual. — 🟡 **Control manual probado en simulador** e instalado en el M12, sin prueba manual en el teléfono todavía. BLE implementado detrás de `RobotLink`, **sin probar con BLE real**.
+6. Flutter: mapa offline (`flutter_map`, tiles z19–20) y editor de área. — ⬜ va en la segunda APK; la navegación quedó preparada.
+7. Integración y APK final. — ⬜ (lo que existe es la APK de prueba 1, con robot simulado).
 
 Decisiones pendientes del usuario: (a) ~~BLE o SPP~~ → BLE, por el intercambio (02/11/26); (b) sin APP conectada: A = el robot queda quieto (recomendado) / B = comportamiento actual; (c) tamaño del cuadrado inicial del área (propuesto 10 × 10 m); (d) ~~confirmar el SO de la Raspberry~~ → ✅ **Raspberry Pi 4, Ubuntu 26.04 "Resolute", ROS 2 Lyrical** (13/11/26).

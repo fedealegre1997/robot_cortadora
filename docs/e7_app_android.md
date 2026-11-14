@@ -196,8 +196,8 @@ En la Raspberry **no se instala nada** de esto.
 | 2 | Bluetooth básico en el ESP (GPS en JSON + ACK), probado con la app nRF Connect | ⬜ Desbloqueado (02/11/26): BLE. Requiere portar antes el sensor al ESP32-S3 |
 | 3 | ESP: comandos hacia los índices 15–23, recepción del polígono, topic `/app/working_area` | ⬜ |
 | 4 | Raspberry: Brain al protocolo de 5 campos + estados/watchdog + `working_area_node` | ⬜ |
-| 5 | Flutter: conexión BT y control manual | ⬜ |
-| 6 | Flutter: mapa offline y editor de área | ⬜ |
+| 5 | Flutter: conexión BT y control manual | 🟡 APK de prueba 1 "Gramanova" (14/11/26): control manual **probado en simulador** (robot simulado dentro de la app), instalado en el Galaxy M12 y sin prueba manual en el teléfono todavía. `BleRobotLink` implementado y testeado con un transporte falso, **sin probar con BLE real** (faltan el firmware BLE del ESP y los UUID). Herramientas bloqueadas por defecto. |
+| 6 | Flutter: mapa offline y editor de área | ⬜ Segunda APK. La navegación quedó preparada para sumar la pantalla |
 | 7 | Integración y APK final | ⬜ |
 
 ### Validación pendiente de la fase 1

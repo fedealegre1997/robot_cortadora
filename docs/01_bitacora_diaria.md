@@ -168,3 +168,9 @@ Este documento condensa el progreso general del proyecto a alto nivel día a dí
   - Verificado el 13/11 a las 22:46: analyze sin problemas y 245/245 tests.
   - Falta: barrido del ciclo de conexión BLE, ronda 4, compilar y verificar la APK arm64, e instalarla en el M12.
   - Estado de la APK: la APK final **todavía no se compiló**. Hubo un build de verificación el 13/11 a las 21:41, con un estado anterior, que no se instaló. Nada está probado en el teléfono. BLE real sin probar (no hay firmware BLE del ESP).
+- **Cierre (14/11, madrugada):**
+  - Se hizo el barrido del ciclo de conexión BLE: 20 combinaciones, más 2 defectos corregidos.
+  - La ronda 4 del auditor quedó en verde (270/270).
+  - Se compiló la **APK debug de 64 bits** `entregas/gramanova_debug_arm64_2026-11-14.apk` (78 MB). El auditor la declaró **APTA**: nombre Gramanova, icono v3, permisos correctos y AUD-10 cerrado.
+  - Quedó **instalada en el Galaxy M12**.
+  - Estado: probada en simulador e instalada; **falta la prueba manual en el teléfono**; BLE real sin probar.

@@ -600,3 +600,43 @@ Este documento es un registro inmutable (append-only) de cada acción, experimen
 - **Docs actualizados:**
   - `CLAUDE.md`: tabla de bloques con "ROS 2 Lyrical" y "Pi 4 Ubuntu 26.04"; comandos de agente/Brain/topics ahora apuntan a `scripts/pi/`; nota distinguiendo PC (Jazzy, firmware) de Pi (Lyrical, producción).
   - `docs/00_estado_actual.md`: header del Brain actualizado a "Host Raspberry Pi 4 — Ubuntu 26.04 + ROS 2 Lyrical"; punto (d) de la hoja de ruta E7 marcado como resuelto.
+
+## [13–14/11/26] - App Android E7 "Gramanova" (PC Windows, 4 agentes + coordinador)
+- **Entorno:**
+  - Repo clonado sin `tools/` (sparse-checkout; rutas largas). Rama `feature/app-android-e7`.
+  - En `D:\dev`, con hashes de las descargas verificados: Temurin 17.0.21+9 (SHA-256), Flutter 3.47.8 (SHA-256), cmdline-tools 23.0 (SHA-1). Con `sdkmanager`: platform-tools 37.0.1, platforms;android-36, build-tools;36.0.0 y ndk;28.2.13676358.
+  - Cachés: `GRADLE_USER_HOME=D:\dev\gradle-home`, `PUB_CACHE=D:\dev\pub-cache`, `ANDROID_USER_HOME=D:\dev\android-user-home`.
+  - `flutter config --jdk-dir D:\dev\jdk-17`.
+  - Telemetría de Flutter y Dart desactivada.
+- **Problemas del entorno y su solución:**
+  - El symlink de prueba falló sin el Modo de desarrollador. Con el modo activo, `New-Item` de PowerShell 5.1 sigue fallando (no usa la opción de crear symlinks sin administrador), pero `mklink` y `Link.create` de Dart funcionan.
+  - `sdkmanager.bat` parte en el `;` los nombres de paquete pasados desde PowerShell. Se resolvió con `--package_file`.
+  - `flutter analyze` (exit 255, `FormatException` del analysis server) y `aapt2` fallan con la "é" de `d:\Moisés`. Se trabaja desde `subst R:`.
+  - `NoDefaultCurrentDirectoryInExePath=1`: hay que llamar `.\gradlew.bat`.
+- **flutter_blue_plus 2.3.15:**
+  - Licencia propia 1.6: paga para uso con fines de lucro. El usuario decidió uso educativo → `License.nonprofit`.
+  - `license_ping.gradle` manda a script.google.com el paquete, el nombre y la versión de la app, la versión del plugin y la fecha. Se desactivó con `tasks.matching{…}.configureEach{enabled=false}` en `app/build.gradle.kts`.
+  - Comprobación: primero se ejecutó la tarea sola, offline y con un proxy inválido, y salió `SKIPPED`. Después también salió `SKIPPED` en cada build real.
+- **Hallazgos del auditor (rondas 1 a 4, más la ronda de la APK):** 16 hallazgos (AUD-01 a 16) y 2 defectos del barrido (D1, D2). Todos cerrados con evidencia ejecutada; AUD-16 se aceptó (timer inocuo).
+  - Los de seguridad:
+    - STOP al levantar el dedo, que se perdía si el dedo se deslizaba (AUD-02).
+    - Comandos BLE descartados durante una escritura en curso (AUD-06).
+    - Cruces de comandos entre conexiones BLE (AUD-12/13).
+    - Carrera `close`/`open` al reconectar (AUD-15).
+  - Pruebas de mutación del STOP: los mutantes A y B y el de AUD-14 fueron detectados. Los archivos se restauraron con hash idéntico.
+- **Caminos descartados y aprendizajes:**
+  - Con fake_async, el teardown se congela después del primer `await`, porque `StreamSubscription.cancel()` devuelve un Future de la zona raíz. Los tests del ciclo de vida BLE tienen que usar async real.
+  - El "+1 µs" para el borde de 300 ms solo funcionaba en los tests: la VM trunca los `Timer` a ms. Se reemplazó por un reloj monotónico consultado al leer.
+  - El empaquetado incremental de AGP en debug reutilizó la APK fat anterior y dejó una APK arm64 de 144 MiB con huecos. Borrando las APK de `build/app/outputs` y reempaquetando, quedó en 74,6 MiB.
+  - Icono: v2 (cortacésped de empuje, ámbar) descartada por la usuaria. Aprobada la v3: robot de perfil, sin manija, cuerpo lima `#B6EB8F` con contorno `#0B2410` sobre césped `#1B5E20`/`#246B29`. La vista desde arriba se descartó porque a 48 px parecía una aspiradora o una diana.
+  - flutter_launcher_icons 0.14.4 es **MIT** (no BSD). Se corrió en un proyecto descartable para no tocar el `pubspec` de la app.
+- **Entrega:**
+  - Commits `1ca55e3`, `5f9b6ce`, `3874f7a` (CHECKPOINT) y `a79daae`.
+  - APK `gramanova_debug_arm64_2026-11-14.apk`, SHA-256 `B3F359E4…6220`. El auditor la declaró APTA.
+  - Instalada en el M12 con `adb install -r` (Success, `primaryCpuAbi=arm64-v8a`). Abrió sin errores en logcat. El teléfono estaba bloqueado: falta la prueba manual de la usuaria.
+- **Pendiente:**
+  - Prueba manual en el M12.
+  - Congelar con el firmware el JSON del comando, `PERR`, el MTU y los UUID.
+  - Firmware BLE del ESP (fase 2).
+  - Segunda APK con mapa y editor (fase 6).
+  - Propuesta opcional del auditor: enviar un STOP inmediato al pasar a `connected`.

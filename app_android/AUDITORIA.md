@@ -565,3 +565,139 @@ Ninguno. **Ningún hallazgo de seguridad reapareció** (STOP, heartbeat y herram
 
 ### Resultado de la ronda
 **EN VERDE.** El único hallazgo abierto es AUD-10 (BAJA), que espera la APK nueva. Sigue lo que pide el CHECKPOINT: commit, APK debug arm64 y verificación del auditor sobre la APK (label "Gramanova", icono adaptativo v3 con fondo, figura y monocromo en `mipmap-anydpi-v26`, permisos y AUD-10).
+
+---
+
+## Ronda APK — 14/11/26
+
+APK: `d:\Moisés\Gramanova\entregas\gramanova_debug_arm64_2026-11-14.apk`, compilada por el coordinador desde el commit `a79daae`. Solo lectura: sin recompilar, sin instalar, sin tocar `lib/`. Herramientas de `D:\dev\android-sdk\build-tools\36.0.0`, sobre la ruta `R:` (la "é" rompe `aapt2`). `git status --short` vacío antes y después.
+
+### 1. Integridad
+
+```
+entrega: B3F359E4F9C50345FE5998A76A766704B949BC48FF59104157B8BACB1CF96220   78272661 B  14/11/2026 03:11:18
+build:   B3F359E4F9C50345FE5998A76A766704B949BC48FF59104157B8BACB1CF96220   78272661 B  14/11/2026 03:11:18
+.sha256: B3F359E4F9C50345FE5998A76A766704B949BC48FF59104157B8BACB1CF96220  gramanova_debug_arm64_2026-11-14.apk
+```
+Los tres coinciden. En `build\app\outputs\flutter-apk\` solo está esa APK (y su `.sha1`).
+
+### 2. Firma
+
+```
+apksigner verify --verbose --print-certs app-debug.apk
+Verifies
+Verified using v1 scheme (JAR signing): false
+Verified using v2 scheme (APK Signature Scheme v2): true
+Verified using v3 scheme (APK Signature Scheme v3): false
+Number of signers: 1
+Signer #1 certificate DN: C=US, O=Android, CN=Android Debug
+Signer #1 certificate SHA-256 digest: 0ec5d71f924541c62b9247d09051a4e4948e8e76d002762c762150d122eec988
+```
+Esquema v2 (suficiente con minSdk 24; el M12 es API 33).
+
+### 3. Nombre
+
+`aapt2 dump badging` → `application: label='Gramanova' icon='res/mipmap-anydpi-v26/ic_launcher.xml'`, y `application-label-*:'Gramanova'` en todos los idiomas.
+
+### 4. Icono
+
+`aapt2 dump xmltree --file res/mipmap-anydpi-v26/ic_launcher.xml`:
+```
+E: adaptive-icon
+    E: background   drawable=@0x7f060006
+    E: foreground   E: inset drawable=@0x7f060007 inset=0.000000%
+    E: monochrome   E: inset drawable=@0x7f060008 inset=0.000000%
+```
+`aapt2 dump resources` → `0x7f060006 drawable/ic_launcher_background`, `0x7f060007 drawable/ic_launcher_foreground`, `0x7f060008 drawable/ic_launcher_monochrome`. No hay `ic_launcher_round` y el manifest tampoco lo pide (solo `icon`).
+
+PNG de la APK contra `git show a79daae:app_android/android/app/src/main/res/...` (SHA-256, prefijo de 16): **las 15 capas (fondo, figura y monocromo en mdpi, hdpi, xhdpi, xxhdpi y xxxhdpi) y el `mipmap-xxxhdpi/ic_launcher.png` de legado son idénticas byte a byte** (p. ej. foreground xxxhdpi `8B0EF35368E7C16C` = `8B0EF35368E7C16C`; monochrome xxxhdpi `9AB30182144346A9` = `9AB30182144346A9`).
+
+Revisión visual (extraídos de la APK): foreground = robot cortacésped verde sobre transparente; background = césped a rayas verdes; legado = la composición de ambos; monochrome = silueta del robot rellena (6272 de 46 656 píxeles muestreados opacos, 6 tonos blanco/gris; Android usa solo su canal alfa), vista correctamente sobre fondo oscuro.
+
+### 5. Permisos (manifest compilado)
+
+```
+aapt2 dump permissions app-debug.apk
+uses-permission: name='android.permission.INTERNET'
+uses-permission: name='android.permission.BLUETOOTH_SCAN' usesPermissionFlags='neverForLocation'
+uses-permission: name='android.permission.BLUETOOTH_CONNECT'
+uses-permission: name='android.permission.BLUETOOTH' maxSdkVersion='30'
+uses-permission: name='android.permission.BLUETOOTH_ADMIN' maxSdkVersion='30'
+uses-permission: name='android.permission.ACCESS_FINE_LOCATION' maxSdkVersion='30'
+uses-permission: name='android.permission.ACCESS_COARSE_LOCATION' maxSdkVersion='28'
+permission: com.robotcortadora.cortadora_e7.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION
+uses-permission: name='com.robotcortadora.cortadora_e7.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION'
+```
+Exactamente lo esperado y nada más. `INTERNET` viene solo de `src/debug` (verificado en la Ronda 1). `DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION` es el permiso interno de androidx (core).
+
+### 6. AUD-10 → **CERRADO**
+
+```
+feature-group: label=''
+  uses-feature-not-required: name='android.hardware.bluetooth'
+  uses-feature-not-required: name='android.hardware.bluetooth_le'
+  uses-feature-not-required: name='android.hardware.location'
+  uses-feature: name='android.hardware.faketouch'
+  uses-implied-feature: name='android.hardware.faketouch' reason='default feature for all apps'
+```
+Las tres features son opcionales en la APK compilada (en la APK de las 21:41 del 13/11, `bluetooth` y `location` eran obligatorias implícitas). `faketouch` es la feature por defecto de toda app.
+
+### 7. ABI y SDK
+
+`native-code: 'arm64-v8a'` (solamente), `minSdkVersion:'24'`, `targetSdkVersion:'36'`, `compileSdkVersion='36'`, `versionName='1.0.0' versionCode='1'`.
+
+### 8. Envío de datos de flutter_blue_plus
+
+`D:\dev\_logs\build_arm64_2026-11-14_031113.log`:
+```
+executing: ... gradlew.bat ... -Ptarget-platform=android-arm64 -Ptarget=lib\main.dart ...
+> Task :app:flutterBluePlusLicensePingDebug SKIPPED
+Skipping task ':app:flutterBluePlusLicensePingDebug' as task onlyIf 'Task is enabled' is false.
+BUILD SUCCESSFUL in 3s
+√ Built build\app\outputs\flutter-apk\app-debug.apk
+exiting with code 0
+```
+**TOOLS_ENABLED:** decodifiqué los `-Pdart-defines` (base64) del log y solo hay `FLUTTER_BUILD_NAME`, `FLUTTER_BUILD_NUMBER`, `FLUTTER_VERSION=3.47.8`, `FLUTTER_CHANNEL`, `FLUTTER_GIT_URL`, `FLUTTER_FRAMEWORK_REVISION`, `FLUTTER_ENGINE_REVISION` y `FLUTTER_DART_VERSION`. **No hay `TOOLS_ENABLED`**: las herramientas quedan bloqueadas (default `false`).
+
+### 9. Contenido = commit `a79daae`
+
+- Horas: commit `a79daae` 14/11 03:08:25 (−03:00); log creado 03:11:13; APK 03:11:18. `git status` vacío.
+- Verificación directa sobre el código, no solo por horas. La APK debug lleva `assets/flutter_assets/kernel_blob.bin` (46 MB) con el texto fuente embebido. Para cada archivo de `lib/` en `a79daae` busqué en el kernel todas sus líneas de más de 25 caracteres:
+
+  | archivo | líneas | en el kernel |
+  |---|---|---|
+  | `app/lifecycle_observer.dart` | 10 | 10 |
+  | `app/link_factory.dart` | 9 | 9 |
+  | `app/session_controller.dart` | 159 | 159 |
+  | `core/app_config.dart` | 14 | 14 |
+  | `core/control_command.dart` | 87 | 87 |
+  | `core/esp_protocol.dart` | 147 | 147 |
+  | `core/robot_link.dart` | 48 | 48 |
+  | `core/simulated_robot_link.dart` | 137 | 137 |
+  | `main.dart` | 14 | 14 |
+  | `ui/app.dart` | 8 | 8 |
+  | `ui/home_shell.dart` | 46 | 46 |
+  | `ui/labels.dart` | 39 | 39 |
+  | `ui/screens/connection_screen.dart` | 54 | 54 |
+  | `ui/screens/control_screen.dart` | 150 | 150 |
+  | `ui/theme.dart` | 24 | 24 |
+  | `ui/widgets/hold_button.dart` | 47 | 47 |
+  | `ui/widgets/requested_panel.dart` | 74 | 74 |
+  | `ui/widgets/simulated_banner.dart` | 15 | 15 |
+  | `ui/widgets/stop_button.dart` | 29 | 29 |
+  | `core/ble_robot_link.dart` | 323 | 25 (solo líneas genéricas que también están en otros archivos) |
+
+  **Los 19 archivos alcanzables coinciden al 100 %** con `a79daae`: el kernel contiene `Gramanova`, `monotonicClock`, `_espStaleTimerFired` y no contiene "Robot Cortadora E7". `ble_robot_link.dart` **no está en la APK**: nada alcanzable desde `main` lo importa (`link_factory.dart` solo construye `SimulatedRobotLink`), así que el enlace BLE no está cableado en esta APK, como corresponde. El texto "BleRobotLink" aparece solo en comentarios de otros archivos, y el paquete `flutter_blue_plus` entra por el registro de plugins. Control de método: un privado alcanzable (`_sendCurrent`) sí aparece, o sea que la ausencia de los privados de BLE no es un artefacto de la búsqueda.
+
+### Observaciones (sin hallazgo)
+
+- Es una APK **debug** (JIT, con `libVkLayer_khronos_validation.so` de 15 MB, propio del modo debug). Corre más lenta que una release en un teléfono de gama baja: las mediciones del heartbeat en el M12 con esta APK son pesimistas (cota superior del retraso).
+- Como el código BLE no está en la APK, las correcciones de AUD-06/12/13/15 y D1/D2 no afectan a esta instalación. Quedan probadas por tests para cuando se cablee BLE.
+
+### Hallazgos nuevos
+
+Ninguno.
+
+### Veredicto
+
+**APTA para instalar** en el Samsung Galaxy M12 (arm64-v8a, API 33): integridad, firma, nombre, icono v3, permisos, features (AUD-10 cerrado), ABI, ping de licencia desactivado, herramientas bloqueadas y código = `a79daae`. No quedan hallazgos abiertos.
