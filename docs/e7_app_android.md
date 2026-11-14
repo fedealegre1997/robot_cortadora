@@ -76,6 +76,18 @@ La APP **pide**; la **Raspberry decide**. La Raspberry conserva la autoridad fin
 - La APP manda el comando a **10 Hz siempre que esté conectada**, aunque no se apriete nada (`dir = 0`). Así la Raspberry distingue "suelto" de "conexión caída".
 - Formato JSON exacto del mensaje de comando por Bluetooth: **a definir en la fase 2**. Debe transportar los campos de los índices 16–21.
 
+> **PROPUESTA (no decidida, a congelar con el firmware)** — implementada en `app_android/lib/core/` (`control_command.dart`, `esp_protocol.dart`).
+>
+> - **Comando (APP → ESP):** una línea JSON terminada en `\n`, sin espacios, claves en este orden, todo enteros:
+>   `{"t":"CMD","state":1,"dir":1,"speed":50,"cutter":0,"trimmer":0,"seq":12}`
+>   Nombres de campo = contrato. Peor caso (`state 3, dir 4, speed 100, cutter 1, trimmer 1, seq 65535`): **77 bytes** con `\n`.
+> - La APP valida rangos antes de enviar (un valor fuera de rango es un error, nunca se recorta). Con `TOOLS_ENABLED=false`, el enlace fuerza `cutter` y `trimmer` a `0` antes de transmitir.
+> - **ACK (ESP → APP):** `{"t":"ACK","seq":N}` por cada comando recibido. Es ACK de **recepción** en el ESP, no de ejecución.
+> - **GPS (ESP → APP), ~1 Hz:** `{"t":"GPS","fix":F,"lat":LAT,"lon":LON,"sats":N,"hdop":H}`. `lat`/`lon` en int32 1e-7° (como POLY); se omiten sin fix. `sats`/`hdop` = `-1` sin dato (como los índices 13–14).
+> - Mensajes ESP → APP con `t` desconocido: la APP los ignora.
+>
+> **MTU (BLE):** el ATT por defecto (MTU 23) deja **20 bytes** de payload → el comando (77 B) **no cabe**. Se propone que la APP pida **MTU 517** al conectar (máximo de Android) y que el ESP acepte al menos **293** (peor POLY 290 B + 3). Mínimos: comando en una sola escritura → MTU ≥ 80; GPS → ≥ 80 (peor caso 77 B); ACK/POK → ≥ 27. Como todo mensaje termina en `\n`, si se negocia menos la APP parte la línea en fragmentos de (MTU − 3) y el ESP acumula hasta `\n` (con MTU 23: 4 escrituras por comando, 15 por POLY de 10 vértices). Esquema GATT propuesto: un servicio con una característica RX (APP → ESP, write) y una TX (ESP → APP, notify). **UUID: PENDIENTES** (no existe el firmware BLE).
+
 ### Watchdog (Raspberry)
 
 - Si `app_state = MANUAL` y (`app_cmd_age_ms > 300` o `app_connected = 0`) → **STOP**.
@@ -111,6 +123,18 @@ JSON, un mensaje por línea:
 | `{"t":"POK","id":N}` | ESP → APP | Recibido y aceptado |
 | `PERR` | ESP → APP | Rechazado (formato exacto a definir en la fase 3) |
 | `{"t":"PCLR"}` | APP → ESP | Borrar el área |
+
+> **PROPUESTA (no decidida) — formato de `PERR`:** `{"t":"PERR","id":N,"e":"<código>"}`. `id` se omite si el ESP no pudo leerlo (ej. `{"t":"PERR","e":"FMT"}`). El ESP valida el `id` antes que el resto: con `e` ≠ `ID` el `id` siempre está en `1`–`65535`; con `e` = `ID` es el eco del id inválido recibido (solo si cabe en int32). La APP descarta mensajes ESP → APP con valores fuera de rango (id, `seq`, `fix` < 0, lat/lon fuera de ±90°/±180°).
+>
+> | `e` | Causa |
+> |---|---|
+> | `FMT` | JSON inválido, `t` incorrecto, campo faltante o de tipo incorrecto |
+> | `NVERT` | Cantidad de vértices fuera de 3–10 |
+> | `RANGE` | Coordenada fuera de int32 |
+> | `ID` | `id` fuera de `1`–`65535` (`0` = "ninguna" en el índice 23; 65535 es exacto en el Float32 de `/sensores`) |
+> | `LEN` | Línea más larga que el buffer de recepción (propuesta: 512 B) |
+>
+> Tamaños: POLY de 10 vértices = **290 B** en el peor caso int32 (`id` 65535, todas las coordenadas `-2147483648`), 280 B con coordenadas geográficas extremas. No entra en un MTU por defecto: ver la nota de MTU en §4. `PCLR` no tiene respuesta definida en el contrato.
 
 ### ESP sensor
 

@@ -1,6 +1,37 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- BLE para flutter_blue_plus 2.3.15. Fuente: README del paquete, seccion
+         "Add permissions for Android (No Location)". El plugin Android
+         (flutter_blue_plus_android 9.0.5) deja su manifest vacio a proposito:
+         los permisos los declara la app. -->
+
+    <!-- Filtro de Play Store solamente. required="false": la app tambien funciona
+         en modo simulado sin BLE, y se instala por fuera de la tienda. -->
+    <uses-feature android:name="android.hardware.bluetooth_le" android:required="false" />
+    <!-- Sin esto, los permisos BLUETOOTH/BLUETOOTH_ADMIN y *_LOCATION hacen que el
+         sistema de build declare como OBLIGATORIAS (implicitas) estas features.
+         Solo afecta el filtro de Play Store; se declaran opcionales para expresar
+         la intencion: la app funciona sin BLE ni GPS (modo simulado). -->
+    <uses-feature android:name="android.hardware.bluetooth" android:required="false" />
+    <uses-feature android:name="android.hardware.location" android:required="false" />
+
+    <!-- Android 12+ (API 31+). neverForLocation: la app no deduce ubicacion por BLE
+         (no usa androidUsesFineLocation ni beacons), asi que en Android 12+ no se
+         pide permiso de ubicacion. -->
+    <uses-permission android:name="android.permission.BLUETOOTH_SCAN"
+        android:usesPermissionFlags="neverForLocation" />
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+
+    <!-- Legado: Android 11 o anterior (API <= 30). El plugin pide FINE_LOCATION
+         en runtime para escanear en API <= 30. -->
+    <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
+    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" android:maxSdkVersion="30" />
+
+    <!-- Legado: Android 9 o anterior (API <= 28). -->
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" android:maxSdkVersion="28" />
+
     <application
-        android:label="cortadora_e7"
+        android:label="Cortadora E7"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher">
         <activity

@@ -47,3 +47,15 @@ kotlin {
 flutter {
     source = "../.."
 }
+
+// flutter_blue_plus_android 9.0.5 registra en cada build una tarea
+// "flutterBluePlusLicensePing<Variante>" (license_ping.gradle) que manda a
+// script.google.com el paquete, el nombre y la versión de la app, la versión
+// del plugin y la fecha. Decisión del usuario (13/11/26): proyecto de uso
+// educativo/personal sin fines de lucro (licencia FlutterBluePlus 1.6, §2/§5),
+// con el envío DESACTIVADO. Solo afecta a este proyecto. `matching` es una
+// colección viva: alcanza también a las tareas que el plugin crea después, en
+// gradle.projectsEvaluated.
+tasks.matching { it.name.startsWith("flutterBluePlusLicensePing") }.configureEach {
+    enabled = false
+}

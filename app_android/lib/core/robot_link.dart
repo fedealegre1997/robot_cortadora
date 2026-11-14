@@ -21,7 +21,8 @@ class PolygonAccepted extends RobotMessage {
   const PolygonAccepted(this.id);
 }
 
-/// `PERR` — polígono rechazado. Formato exacto: PROPUESTA (Directiva §5.2).
+/// `PERR` — polígono rechazado (Directiva §3.2). Formato exacto: pendiente
+/// (Directiva §5, decisión abierta 2); la PROPUESTA está en docs/e7_app_android.md §5.
 class PolygonRejected extends RobotMessage {
   final int? id;
   final String? reason;
@@ -76,6 +77,13 @@ abstract class RobotLink {
 
   /// `{"t":"POLY","id":N,"p":[[lat,lon],...]}` — lat/lon int32 en 1e-7°,
   /// 3 a 10 vértices (Directiva §3.2). La APK 1 no tiene editor: solo tests.
+  ///
+  /// Polígono que no cumple la integridad del contrato (decisión del
+  /// coordinador, AUD-07): la respuesta `POK`/`PERR` la da SOLO el ESP.
+  /// - `BleRobotLink` lanza [ArgumentError] y no envía nada: nunca fabrica un
+  ///   `PERR` que el ESP no mandó.
+  /// - `SimulatedRobotLink` emula al ESP: recibe lo que se le mande y responde
+  ///   `PERR` por el stream [messages], como lo haría el ESP real.
   Future<void> sendPolygon(int id, List<(int, int)> points);
 
   /// `{"t":"PCLR"}` — borrar el área.

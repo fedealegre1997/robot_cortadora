@@ -1,30 +1,26 @@
-// This is a basic Flutter widget test.
-//
-// To perform an interaction with a widget in your test, use the WidgetTester
-// utility in the flutter_test package. For example, you can send tap and scroll
-// gestures. You can also use WidgetTester to find child widgets in the widget
-// tree, read text, and verify that the values of widget properties are correct.
+// Smoke test de la app (reemplaza el test de contador de la plantilla).
+// Usa el RobotLink falso propio: no depende de lib/core implementado.
 
-import 'package:flutter/material.dart';
+import 'package:cortadora_e7/ui/app.dart';
+import 'package:cortadora_e7/ui/labels.dart';
+import 'package:cortadora_e7/ui/widgets/stop_button.dart';
+import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:cortadora_e7/main.dart';
+import 'app/fakes.dart';
 
 void main() {
-  testWidgets('Counter increments smoke test', (WidgetTester tester) async {
-    // Build our app and trigger a frame.
-    await tester.pumpWidget(const MyApp());
+  testWidgets('la app arranca con banner simulado y STOP visible',
+      (tester) async {
+    final link = FakeRobotLink();
+    final c = makeController(link);
+    await tester.pumpWidget(CortadoraApp(controller: c));
 
-    // Verify that our counter starts at 0.
-    expect(find.text('0'), findsOneWidget);
-    expect(find.text('1'), findsNothing);
+    expect(find.text(Labels.appTitle), findsOneWidget);
+    expect(find.text(Labels.simulatedBanner), findsOneWidget);
+    expect(find.byKey(StopButton.buttonKey), findsOneWidget);
 
-    // Tap the '+' icon and trigger a frame.
-    await tester.tap(find.byIcon(Icons.add));
-    await tester.pump();
-
-    // Verify that our counter has incremented.
-    expect(find.text('0'), findsNothing);
-    expect(find.text('1'), findsOneWidget);
+    await tester.pumpWidget(const SizedBox.shrink());
+    c.dispose();
   });
 }
