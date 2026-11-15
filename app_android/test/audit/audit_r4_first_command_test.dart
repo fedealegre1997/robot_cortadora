@@ -157,8 +157,12 @@ void main() {
     await link.dispose();
   });
 
-  test('(caracterización) pedidos EXPLÍCITOS del usuario antes del primer tick (100 ms) '
-      'salen como primer comando: el controlador no fuerza un STOP inicial', () async {
+  // REGLA NUEVA (Paso 1, aprobada por el usuario): al pasar a connected el
+  // controlador manda un STOP inmediato. La caracterización anterior ("pedidos
+  // explícitos antes del primer tick salen primero") quedó OBSOLETA y se
+  // invierte: ahora el primero es SIEMPRE STOP, y lo pedido sale después.
+  test('pedidos EXPLÍCITOS antes del primer tick (100 ms): el primer comando es STOP; '
+      'lo pedido sale DESPUÉS, en orden y sin perderse', () async {
     final t = R4Transport();
     final link = BleRobotLink.withTransport(on, t);
     final c = SessionController(link: link, config: on);
@@ -168,31 +172,30 @@ void main() {
     c.setCutter(true);
     c.pressDirection(Direction.forward);
     await Future<void>.delayed(const Duration(milliseconds: 250));
-    final first = t.commands(1).first.$1;
+    final cmds = t.commands(1).map((e) => e.$1).toList();
     // ignore: avoid_print
-    print('R4 caracterización 2: primer comando con MANUAL+adelante+cortadora pedidos '
-        'en < 100 ms = $first');
-    expect(first.state, RobotState.manual);
+    print('R4 regla nueva: comandos de la conexión 1 = ${cmds.take(3).toList()}');
+    expectSafeStop(cmds.first, 'primer comando de la conexión');
+    final firstNonStop = cmds.firstWhere((x) => x.state != RobotState.stop);
+    expect(firstNonStop.seq, greaterThan(cmds.first.seq));
+    expect((firstNonStop.state, firstNonStop.dir, firstNonStop.cutter),
+        (RobotState.manual, Direction.forward, 1),
+        reason: 'lo pedido no se pierde');
     await c.disconnect();
     c.dispose();
     await link.dispose();
   });
 
-  test('(caracterización) si el usuario pide MANUAL en los primeros 100 ms, el primer '
-      'comando puede ser MANUAL, pero SIN movimiento ni herramientas', () async {
+  test('MANUAL pedido enseguida (< 100 ms): el primer comando sigue siendo un STOP completo',
+      () async {
     final t = R4Transport();
     final link = BleRobotLink.withTransport(on, t);
     final c = SessionController(link: link, config: on);
     await c.connect();
     await Future<void>.delayed(Duration.zero);
-    c.requestState(RobotState.manual); // pedido explícito, antes del primer tick
+    c.requestState(RobotState.manual);
     await Future<void>.delayed(const Duration(milliseconds: 250));
-    final first = t.commands(1).first.$1;
-    // ignore: avoid_print
-    print('R4 caracterización: primer comando con MANUAL pedido enseguida = $first');
-    expect(first.dir, Direction.none);
-    expect(first.cutter, 0);
-    expect(first.trimmer, 0);
+    expectSafeStop(t.commands(1).first.$1, 'primer comando con MANUAL pedido enseguida');
     await c.disconnect();
     c.dispose();
     await link.dispose();

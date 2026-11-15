@@ -56,6 +56,7 @@ class SessionController extends ChangeNotifier {
     _statusSub = link.statusStream.listen(_onStatus);
     _messageSub = link.messages.listen(_onMessage);
     if (_status == LinkStatus.connected) {
+      _sendCurrent(); // STOP inmediato también si ya nace conectado
       _startHeartbeat();
     }
   }
@@ -291,6 +292,7 @@ class SessionController extends ChangeNotifier {
     if (nowConnected && !wasConnected) {
       // Al (re)conectar se arranca SIEMPRE en STOP: nunca se retoma lo anterior.
       _resetToSafeStop();
+      _sendCurrent(); // primer comando de la conexión: STOP, sin esperar el tick
       _startHeartbeat();
     } else if (!nowConnected) {
       // Pérdida de conexión: lo pedido pasa a STOP seguro.

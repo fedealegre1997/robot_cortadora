@@ -40,9 +40,10 @@ void main() {
       fakeAsync((async) {
         final (link, c) = setUpConnected(async);
         async.elapse(const Duration(seconds: 1));
-        expect(link.sent, hasLength(10));
+        // 1 STOP inmediato al conectar (t = 0) + 10 ticks del heartbeat.
+        expect(link.sent, hasLength(11));
         expect(link.sentAt,
-            [for (var i = 1; i <= 10; i++) tick * i]);
+            [Duration.zero, for (var i = 1; i <= 10; i++) tick * i]);
         for (final cmd in link.sent) {
           expect(cmd.dir, Direction.none);
         }
@@ -97,9 +98,9 @@ void main() {
         final (link, c) = setUpConnected(async, seqStart: 65530);
         async.elapse(const Duration(seconds: 1));
         expect(link.sent.map((e) => e.seq).toList(),
-            [65530, 65531, 65532, 65533, 65534, 65535, 0, 1, 2, 3]);
-        expect(c.lastSentSeq, 3);
-        expect(c.sentCount, 10);
+            [65530, 65531, 65532, 65533, 65534, 65535, 0, 1, 2, 3, 4]);
+        expect(c.lastSentSeq, 4);
+        expect(c.sentCount, 11);
         c.dispose();
       });
     });
@@ -117,13 +118,14 @@ void main() {
         expect(link.sent, isEmpty);
 
         link.setStatus(LinkStatus.connected);
+        expect(link.sent, hasLength(1)); // STOP inmediato, sin esperar el tick
         async.elapse(const Duration(milliseconds: 500));
-        expect(link.sent, hasLength(5));
+        expect(link.sent, hasLength(6));
 
         link.setStatus(LinkStatus.disconnected);
         expect(c.heartbeatActive, isFalse);
         async.elapse(const Duration(seconds: 1));
-        expect(link.sent, hasLength(5));
+        expect(link.sent, hasLength(6));
         expect(async.pendingTimers, isEmpty);
         c.dispose();
       });
@@ -132,9 +134,10 @@ void main() {
     test('dispose cancela el heartbeat', () {
       fakeAsync((async) {
         final (link, c) = setUpConnected(async);
+        expect(link.sent, hasLength(1)); // solo el STOP inicial
         c.dispose();
         async.elapse(const Duration(seconds: 1));
-        expect(link.sent, isEmpty);
+        expect(link.sent, hasLength(1));
         expect(async.pendingTimers, isEmpty);
       });
     });
@@ -145,11 +148,14 @@ void main() {
         () {
       fakeAsync((async) {
         final (link, c) = setUpConnected(async);
+        expect(link.sent, hasLength(1)); // STOP inicial, dir 0
+        expect(link.sent.first.state, RobotState.stop);
         c.requestState(RobotState.manual);
         c.setSpeed(40);
         c.pressDirection(Direction.forward);
         async.elapse(const Duration(milliseconds: 500));
-        expect(link.sent.map((e) => e.dir), everyElement(Direction.forward));
+        expect(link.sent.skip(1).map((e) => e.dir),
+            everyElement(Direction.forward));
         expect(link.sent.last.state, RobotState.manual);
         expect(link.sent.last.speed, 40);
 
@@ -341,8 +347,95 @@ void main() {
         link.setStatus(LinkStatus.connected);
         async.elapse(const Duration(seconds: 1));
         final after = link.sent.skip(n).toList();
-        expect(after, hasLength(10));
+        expect(after, hasLength(11)); // STOP inmediato + 10 ticks
         after.forEach(expectSafeStop);
+        c.dispose();
+      });
+    });
+
+    test('STOP inmediato al conectar: primer envío, mismo instante, completo',
+        () {
+      for (final tools in [false, true]) {
+        fakeAsync((async) {
+          final link = FakeRobotLink(clock: () => async.elapsed);
+          final c = makeController(link, toolsEnabled: tools, seqStart: 65535);
+          async.elapse(const Duration(milliseconds: 250));
+          link.setStatus(LinkStatus.connecting);
+          // Lo pedido durante "connecting" no se transmite.
+          c.requestState(RobotState.manual);
+          c.pressDirection(Direction.forward);
+          c.setCutter(true);
+          async.elapse(const Duration(milliseconds: 50));
+          expect(link.sent, isEmpty);
+
+          final t0 = async.elapsed;
+          link.setStatus(LinkStatus.connected);
+          // Sin flush ni elapse: el STOP ya salió, antes de cualquier tick.
+          expect(link.sent, hasLength(1), reason: 'tools=$tools');
+          expect(link.sentAt.single, t0);
+          expectSafeStop(link.sent.single);
+          expect(link.sent.single.seq, 65535);
+          expect(c.state, RobotState.stop);
+
+          // El siguiente (heartbeat) llega a +100 ms, seq contiguo, sin
+          // un segundo STOP duplicado en el mismo instante.
+          async.elapse(const Duration(milliseconds: 99));
+          expect(link.sent, hasLength(1));
+          async.elapse(const Duration(milliseconds: 1));
+          expect(link.sent, hasLength(2));
+          expect(link.sentAt[1] - t0, tick);
+          expect(link.sent.map((e) => e.seq).toList(), [65535, 0]);
+          async.elapse(const Duration(seconds: 1));
+          expect(link.sent, hasLength(12));
+          for (var i = 1; i < link.sentAt.length; i++) {
+            expect(link.sentAt[i] - link.sentAt[i - 1], tick);
+          }
+          link.sent.forEach(expectSafeStop);
+          c.dispose();
+        });
+      }
+    });
+
+    test('STOP inmediato en CADA reconexión tras una caída', () {
+      for (final tools in [false, true]) {
+        fakeAsync((async) {
+          final link = FakeRobotLink(clock: () => async.elapsed);
+          final c = makeController(link, toolsEnabled: tools);
+          for (var i = 0; i < 5; i++) {
+            final n = link.sent.length;
+            link.setStatus(LinkStatus.connected);
+            expect(link.sent.length, n + 1, reason: 'conexión $i tools=$tools');
+            expect(link.sentAt.last, async.elapsed);
+            expectSafeStop(link.sent.last);
+
+            // El usuario pide de todo, y después cae el enlace.
+            c.requestState(RobotState.manual);
+            c.setSpeed(80);
+            c.setCutter(true);
+            c.setTrimmer(true);
+            c.pressDirection(Direction.forward);
+            async.elapse(const Duration(milliseconds: 350));
+            expect(link.sent.last.state, RobotState.manual);
+            link.setStatus(LinkStatus.disconnected);
+            async.elapse(const Duration(milliseconds: 500));
+            // Caída: no se envía nada más hasta reconectar.
+            final m = link.sent.length;
+            async.elapse(const Duration(seconds: 1));
+            expect(link.sent.length, m);
+            expect(async.pendingTimers, isEmpty);
+          }
+          c.dispose();
+        });
+      }
+    });
+
+    test('nace ya conectado: también envía STOP de inmediato', () {
+      fakeAsync((async) {
+        final link = FakeRobotLink(clock: () => async.elapsed);
+        link.setStatus(LinkStatus.connected);
+        final c = makeController(link);
+        expect(link.sent, hasLength(1));
+        expectSafeStop(link.sent.single);
         c.dispose();
       });
     });

@@ -17,7 +17,12 @@ const tick = Duration(milliseconds: 100);
 
 void main() {
   group('A1 heartbeat 10 Hz (fake_async)', () {
-    test('10 minutos conectado sin tocar nada: 6000 envíos, cada 100 ms exactos, dir 0',
+    // REGLA NUEVA (Paso 1, aprobada por el usuario): al pasar a `connected` el
+    // controlador envía un STOP inmediato (t = 0) y recién después corre el
+    // heartbeat. Invariantes que NO se aflojan: tick cada 100 ms exactos
+    // (medido desde el primer tick, no desde el STOP), un solo heartbeat,
+    // dir 0 y STOP en todos los envíos.
+    test('10 minutos conectado sin tocar nada: STOP inmediato + 6000 ticks cada 100 ms exactos, dir 0',
         () {
       fakeAsync((async) {
         final link = RecordingLink(clock: () => async.elapsed);
@@ -26,9 +31,11 @@ void main() {
         async.flushMicrotasks(); // stream asíncrono, como los enlaces reales
         final t0 = async.elapsed;
         async.elapse(const Duration(minutes: 10));
-        expect(link.sent.length, 6000);
-        for (var i = 0; i < link.sentAt.length; i++) {
-          expect(link.sentAt[i] - t0, tick * (i + 1), reason: 'envío $i');
+        expect(link.sent.length, 6001, reason: '1 STOP inmediato + 6000 ticks');
+        expect(link.sentAt.first - t0, Duration.zero, reason: 'el STOP sale en t = 0');
+        for (var i = 1; i < link.sentAt.length; i++) {
+          expect(link.sentAt[i] - t0, tick * i, reason: 'tick $i');
+          expect(link.sentAt[i] - link.sentAt[i - 1], tick, reason: 'hueco antes del tick $i');
         }
         expect(link.sent.map((e) => e.dir), everyElement(Direction.none));
         expect(link.sent.map((e) => e.state), everyElement(RobotState.stop));
@@ -118,8 +125,16 @@ void main() {
           async.flushMicrotasks();
           expect(async.periodicTimerCount, 0);
         }
-        // 50 conexiones × 2 ticks en 250 ms = 100 envíos
-        expect(link.sent.length, 100);
+        // 50 conexiones × (1 STOP inmediato + 2 ticks en 250 ms) = 150 envíos,
+        // con los ticks a 100 ms exactos DESDE el primer tick de cada conexión
+        // (nunca un tick extra ni un tick adelantado por el STOP).
+        expect(link.sent.length, 150);
+        for (var k = 0; k < 50; k++) {
+          final base = link.sentAt[k * 3];
+          expect(link.sentAt[k * 3 + 1] - base, tick, reason: 'conexión $k: primer tick');
+          expect(link.sentAt[k * 3 + 2] - base, tick * 2, reason: 'conexión $k: segundo tick');
+          expect(link.sent[k * 3].state, RobotState.stop, reason: 'conexión $k: 1.º es STOP');
+        }
         c.dispose();
       });
     });
@@ -141,9 +156,12 @@ void main() {
         async.flushMicrotasks();
         async.elapse(const Duration(milliseconds: 600));
         final seqs = link.receivedCommands.map((e) => e.seq).toList();
-        expect(seqs, [65533, 65534, 65535, 0, 1, 2]);
+        // Regla nueva: el STOP inmediato al conectar consume el primer seq
+        // (65533); después, 6 ticks en 600 ms.
+        expect(seqs, [65533, 65534, 65535, 0, 1, 2, 3]);
+        expect(link.receivedCommands.first.state, RobotState.stop);
         expect(acks, seqs);
-        expect(link.lastTransmittedLine, contains('"seq":2}'));
+        expect(link.lastTransmittedLine, contains('"seq":3}'));
         c.disconnect();
         async.elapse(tick);
         c.dispose();
@@ -159,7 +177,9 @@ void main() {
         link.setStatus(LinkStatus.connected);
         async.flushMicrotasks();
         async.elapse(tick * 131072);
-        expect(link.sent.length, 131072);
+        // 1 STOP inmediato + 131072 ticks: la secuencia 0,1,2,… no tiene saltos
+        // ni repetidos a través de DOS vueltas completas (65535 → 0).
+        expect(link.sent.length, 131073);
         for (var i = 0; i < link.sent.length; i++) {
           expect(link.sent[i].seq, i % 65536);
         }
@@ -179,7 +199,10 @@ void main() {
         c.releaseDirection(); // inmediato
         c.stop(); // inmediato
         async.elapse(tick);
-        expect(link.sent.map((e) => e.seq).toList(), [65534, 65535, 0]);
+        // 65534 = STOP inmediato al conectar; 65535 = releaseDirection;
+        // 0 = stop(); 1 = el tick de elapse(tick). Sin saltos ni repetidos.
+        expect(link.sent.map((e) => e.seq).toList(), [65534, 65535, 0, 1]);
+        expect(link.sent.first.state, RobotState.stop);
         c.dispose();
       });
     });
