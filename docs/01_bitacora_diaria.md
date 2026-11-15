@@ -174,3 +174,22 @@ Este documento condensa el progreso general del proyecto a alto nivel día a dí
   - Se compiló la **APK debug de 64 bits** `entregas/gramanova_debug_arm64_2026-11-14.apk` (78 MB). El auditor la declaró **APTA**: nombre Gramanova, icono v3, permisos correctos y AUD-10 cerrado.
   - Quedó **instalada en el Galaxy M12**.
   - Estado: probada en simulador e instalada; **falta la prueba manual en el teléfono**; BLE real sin probar.
+
+## 14–15/11/26 — Cadena de control hacia la cortadora real (pasos 1 y 2)
+
+- **Reparto:** la usuaria desarrolla la app entera en esta PC (Windows). Su compañero de equipo, en Linux, se encarga del firmware BLE del ESP32, el Brain a protocolo v4, el watchdog del motor y las pruebas físicas. Para él se dejan documentos; no se toca firmware, Brain, scripts, `CMakeLists`, `tools/` ni la Raspberry.
+- **Paso 0:** la usuaria hizo las pruebas manuales en el M12; la APK queda validada como APK de prueba en modo simulado.
+- **Paso 1, STOP inmediato al conectar** (commit `77f51e2`): al pasar a `connected` la app envía un STOP completo antes del primer latido; el primer comando de cada conexión es siempre STOP. Auditado con mutaciones. Compilado y probado **en simulador**, no con BLE real.
+- **Paso 2, protocolo BLE:**
+  - Documento nuevo `docs/protocolo_ble_app_esp.md` (v1.0, **pendiente de revisión de la usuaria y de su compañero; no congelado**) y paquete `docs/entrega_companero_firmware.md` con recomendaciones y preguntas para el compañero.
+  - Decisiones de la usuaria del 14/11/26, escritas como requisitos del contrato (el compañero puede objetarlas):
+    - Si la app se desconecta o el comando supera 300 ms, el ESP pasa `app_state` a STOP y no reanuda solo.
+    - El STOP queda retenido tras un corte en AUTO hasta recibir un `state:0` válido y un pedido nuevo de AUTO; el ESP avisa a la app con `ESTOP` (el formato es propuesta, pendiente de su confirmación).
+    - El robot conserva el polígono vigente al desconectarse.
+    - Mensaje `AREA` (ESP→app) con el área activa.
+  - Seguridad del enlace: emparejamiento con clave de 6 dígitos que no va en el repo. La ventana de emparejamiento con botón físico es una **recomendación fuerte** cuya decisión es del compañero.
+  - Pregunta abierta de la usuaria: si el STOP retenido también aplica a MANUAL.
+  - UUID generados al azar y **no cargados en el código** de la app (`BleConfig` sigue en null), de modo que la conexión BLE real queda bloqueada hasta que exista el firmware.
+- **Cambio de código:** el parser de referencia `ControlCommand.fromJsonLine` rechaza claves duplicadas de primer nivel comparando las claves ya decodificadas. La primera versión comparaba el texto crudo y se evadía con `t` (AUD-25); el auditor lo encontró y se corrigió.
+- **Pendiente de la app (segunda APK):** decodificar `AREA` y `ESTOP`, guardar los polígonos por número y que el simulador emule el corte y `AREA`. Tiles del mapa y cuadrado inicial: se consultan antes de empezar.
+- **Auditoría:** AUD-17 a AUD-29, en `app_android/AUDITORIA.md`. AUD-28 queda abierto (depende de la pregunta de MANUAL).

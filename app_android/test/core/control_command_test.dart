@@ -159,6 +159,86 @@ void main() {
     });
   });
 
+  group('clave duplicada (AUD-20)', () {
+    const base = '{"t":"CMD","state":1,"dir":1,"speed":50,"cutter":0,"trimmer":0,"seq":12';
+
+    test('una clave de primer nivel repetida se rechaza, venga donde venga', () {
+      for (final dup in [
+        '$base,"cutter":1}', // al final: ganaría el 1
+        '{"cutter":1,${base.substring(1)}}', // al principio
+        '$base,"trimmer":1}',
+        '$base,"seq":13}',
+        '$base,"t":"CMD"}', // aunque el valor sea igual
+        '$base,"x":1,"x":2}', // clave desconocida repetida
+      ]) {
+        expect(() => ControlCommand.fromJsonLine(dup), throwsFormatException, reason: dup);
+      }
+    });
+
+    test('AUD-25: duplicados disfrazados con escapes (se comparan las claves DECODIFICADAS)', () {
+      // Cada caso decodifica a una clave que ya está en el objeto.
+      for (final dup in [
+        '$base,"cut\\u0074er":1}', // t = t
+        '$base,"\\u0063utter":1}', // c = c, al inicio
+        '$base,"\\u0063\\u0075\\u0074\\u0074\\u0065\\u0072":1}', // toda la clave escapada
+        '{"cut\\u0074er":1,${base.substring(1)}}', // el escapado primero
+        '$base,"se\\u0071":13}', // q = q
+        '$base,"tr\\u0069mmer":1}', // i = i
+        '$base,"\\u0073tate":2}', // s = s
+        '$base,"cutt\\u0065r":1}', // hex en minúscula
+        '$base,"cutt\\u0045r":1}'.replaceFirst('\\u0045', '\\u0065'),
+        '$base,"\\u0054":"CMD"}'.replaceFirst('\\u0054', '\\u0074'), // la clave "t"
+      ]) {
+        expect(() => ControlCommand.fromJsonLine(dup), throwsFormatException, reason: dup);
+      }
+      // Mayúsculas en el escape (T = T, C = C) decodifican a OTRA letra:
+      // "Tter" no es "tter"; no es duplicado ("cuTter" = "cuTter", clave nueva).
+      expect(ControlCommand.fromJsonLine('$base,"cu\\u0054ter":1}').cutter, 0);
+      // Pero hex en mayúscula del MISMO carácter sí cuenta: J y J son la misma J.
+      expect(() => ControlCommand.fromJsonLine('$base,"\\u004A":1,"\\u004a":2}'),
+          throwsFormatException);
+    });
+
+    test('AUD-25: \\/ , \\" y pares sustitutos en las claves', () {
+      // "t\/" no es "t": son claves distintas; no hay duplicado.
+      expect(ControlCommand.fromJsonLine('$base,"x\\/y":1}').seq, 12);
+      // x/y repetida con y sin escape: es DUPLICADO ("x\/y" == "x/y").
+      expect(() => ControlCommand.fromJsonLine('$base,"x/y":1,"x\\/y":2}'), throwsFormatException);
+      // comilla escapada dentro de la clave: no corta la clave ni la duplica.
+      expect(ControlCommand.fromJsonLine('$base,"a\\"b":1,"a\\"c":2}').seq, 12);
+      expect(() => ControlCommand.fromJsonLine('$base,"a\\"b":1,"a\\u0022b":2}'), throwsFormatException);
+      // barra invertida escapada al final de la clave
+      expect(ControlCommand.fromJsonLine('$base,"k\\\\":1,"k":2}').seq, 12);
+      // par sustituto (😀 = 😀) escrito de dos formas
+      expect(() => ControlCommand.fromJsonLine('$base,"😀":1,"\\ud83d\\ude00":2}'), throwsFormatException);
+      expect(ControlCommand.fromJsonLine('$base,"😀":1,"😁":2}').seq, 12);
+    });
+
+    test('lo que NO es duplicado se acepta: claves desconocidas, anidadas y con espacios', () {
+      expect(ControlCommand.fromJsonLine('$base,"x":9}').seq, 12);
+      expect(ControlCommand.fromJsonLine('$base,"a":{"k":1,"k":2}}').seq, 12,
+          reason: 'solo cuentan las claves de primer nivel');
+      expect(ControlCommand.fromJsonLine('$base,"s":"a,\\"cutter\\":1"}\r\n').seq, 12,
+          reason: 'lo que está dentro de una cadena no es una clave');
+      expect(ControlCommand.fromJsonLine('{ "t" : "CMD" , "state":1,"dir":1,"speed":50,'
+              '"cutter":0,"trimmer":0,"seq":12 }')
+          .seq, 12);
+    });
+
+    test('el JSON propio nunca se rechaza (ida y vuelta intacta)', () {
+      for (var q = 0; q < 300; q += 7) {
+        final c = ControlCommand(
+            state: RobotState.values[q % 4],
+            dir: Direction.values[q % 5],
+            speed: q % 101,
+            cutter: q % 2,
+            trimmer: (q ~/ 2) % 2,
+            seq: q * 200);
+        expect(ControlCommand.fromJsonLine(c.toJsonLine()), c);
+      }
+    });
+  });
+
   group('SeqCounter', () {
     test('arranca en 0 e incrementa', () {
       final s = SeqCounter();

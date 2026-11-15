@@ -701,3 +701,273 @@ Ninguno.
 ### Veredicto
 
 **APTA para instalar** en el Samsung Galaxy M12 (arm64-v8a, API 33): integridad, firma, nombre, icono v3, permisos, features (AUD-10 cerrado), ABI, ping de licencia desactivado, herramientas bloqueadas y código = `a79daae`. No quedan hallazgos abiertos.
+
+---
+
+## Paso 1 — STOP al conectar — 15/11/26
+
+Base `22427ee` + cambios sin commitear del Agente 2 en `lib/app/session_controller.dart` (SHA-256 `D64CF49105B3B883FF0D5FE497342CB7D5A51474BB152ED1FE1D0D7F09633CDE`) y `test/app/session_controller_test.dart`. Regla nueva aprobada por el usuario: al pasar a `connected` el primer envío de cada conexión es un STOP completo, sincrónico, y el heartbeat arranca después. Cambio de código: 2 líneas (`_sendCurrent()` en `_onStatus` tras `_resetToSafeStop()` y en el constructor si nace conectado, ambas antes de `_startHeartbeat()`).
+
+### Corridas literales (desde `R:\app_android`)
+
+```
+flutter.bat analyze                                                  → No issues found! (ran in 3.3s)
+flutter.bat test test/app test/ui test/widget_test.dart --concurrency=1 → 00:11 +52: All tests passed!   (Agente 2 dijo 52: coincide)
+flutter.bat test test/audit --concurrency=1                          → 00:39 +118: All tests passed!
+flutter.bat test --concurrency=1                                     → 00:55 +290: All tests passed!
+```
+290 = 120 (core) + 52 (app/ui) + 118 (auditor). El "267 verdes + 6 rojos" del Agente 2 era antes de reescribir mis 6 (267 + 6 + 17 de mis tests nuevos = 290).
+
+### 1. Los 6 tests míos reescritos — diff explícito (ninguno quedó más flojo)
+
+Hashes (SHA-256): `audit_heartbeat_test.dart` `B6833ED1C21A73907C2F28D99F6C4092467FD34907A96E62A6EE0D4EA22037DF` → `8349B421E2C39832BD671075E742547E057B501917E145FCBC6AD6DAF41B3BCA`; `audit_r4_first_command_test.dart` `C7061BC905F571480FC8A9222FA23104E5555AA4214D63C6F73D7D5B15616BBB` → `53674949543B1C39771FBA6903ED0520CCC187C3D5168A677A32335982F3D4CB`. Los demás archivos de `test/audit/` no cambiaron (hashes de `audit_hashes_paso1_antes.txt` iguales). Archivo nuevo: `audit_paso1_stop_on_connect_test.dart` `8B7E8F02801F33DBBB35C503B9730E7976771482EB35736B930325BA961F83E7`.
+
+| # | Archivo / test | Aserción antes | Aserción ahora | Por qué / ¿más flojo? |
+|---|---|---|---|---|
+| 1 | `audit_heartbeat_test.dart` A1 "10 minutos…" | `sent.length == 6000`; para todo `i`: `sentAt[i] − t0 == 100 ms·(i+1)`; todos `dir none`, todos `state stop` | `sent.length == 6001`; `sentAt.first − t0 == 0` (STOP en t = 0); para `i ≥ 1`: `sentAt[i] − t0 == 100 ms·i` **y** hueco entre envíos consecutivos `== 100 ms`; se conservan `dir none` y `state stop` en todos | Regla nueva: +1 STOP inmediato. **Más estricto**: se agregó el hueco de 100 ms medido entre envíos y que el STOP salga exactamente en t = 0. |
+| 2 | A1 "reconexión repetida (50 veces)" | `periodicTimerCount == 1` al conectar y `0` al caer (se conservan); `sent.length == 100` | `sent.length == 150` (50 × (1 STOP + 2 ticks)); para cada conexión `k`: primer tick a `+100 ms` y segundo a `+200 ms` **medidos desde el STOP de esa conexión**, y el 1.º envío de cada conexión es `state stop` | Regla nueva. **Más estricto**: antes solo contaba envíos; ahora verifica cadencia por conexión y que el primero sea STOP. Un tick de más o adelantado haría fallar. |
+| 3 | A3 "seq… vuelta 65535 → 0" (simulador real) | recibidos `[65533, 65534, 65535, 0, 1, 2]`; ACKs == seqs; `lastTransmittedLine` contiene `"seq":2}` | `[65533, 65534, 65535, 0, 1, 2, 3]`; ACKs == seqs; `"seq":3}`; y `receivedCommands.first.state == stop` | Regla nueva: el STOP consume 65533. Misma vuelta sin saltos; **agrega** que el primero sea STOP. |
+| 4 | A3 "2 vueltas" | `sent.length == 131072`; `seq[i] == i % 65536` para todo `i` | `sent.length == 131073`; el mismo bucle `seq[i] == i % 65536` sobre los 131 073 envíos | Regla nueva (+1). Se mantiene sin cambios el chequeo de saltos y repetidos a través de las 2 vueltas. Igual de estricto. |
+| 5 | A3 "envíos inmediatos… sin repetir" | `[65534, 65535, 0]` | `[65534, 65535, 0, 1]` y `sent.first.state == stop` | Regla nueva: 65534 pasa a ser el STOP de conexión y el 3.º envío (tick) se agrega. Sin saltos; **agrega** que el primero sea STOP. |
+| 6 | `audit_r4_first_command_test.dart` "(caracterización) pedidos EXPLÍCITOS…" | `first.state == manual` (el primero era lo pedido) | `expectSafeStop(cmds.first)` (STOP completo) **y** el primer no-STOP posterior tiene seq mayor y es exactamente `manual/forward/cutter 1` (lo pedido no se pierde) | Obsoleta: la regla la **invierte**. Más estricto: no solo el primero es STOP, también verifica que lo pedido sale después y en orden. |
+| 6b | mismo archivo, "(caracterización) MANUAL pedido enseguida" | `first.dir/cutter/trimmer == 0` | `expectSafeStop(first)` (state stop, dir none, speed 0, cutter 0, trimmer 0) | **Más estricto** (compara los 5 campos, antes 3 y sin `state`/`speed`). |
+
+Ninguna aserción sobre STOP desapareció ni se relajó; las de cadencia, duplicados y vuelta de seq se mantienen o se endurecen. El único cambio de conteo es el envío extra del STOP al conectar.
+
+### 2. Tests propios independientes de la regla (`audit_paso1_stop_on_connect_test.dart`, 17 tests; `fake_async`, doble de enlace propio con streams sincrónicos o asíncronos, simulador real y `main.dart` real)
+
+Con `toolsEnabled` false **y** true: primer envío = STOP completo con seq válido, sincrónico con `setStatus(connected)` (log `['status:connected','send']`, sin `flushMicrotasks`), primer tick a +100 ms exactos (a +99 ms todavía no); lo mismo con streams asíncronos; 7 reconexiones seguidas con TODO pedido antes de cada caída (el primero de cada conexión es STOP, seq `(n+1) % 65536` sin saltos en toda la sesión); pedidos durante `connecting` y **en el instante exacto de `connected`, con un listener registrado antes que el del controlador**, no salen y el primero es STOP; pedidos en la ventana entre el cambio del enlace y la entrega del aviso asíncrono se ignoran; el controlador nace ya conectado. Además: `connected` duplicado; `connected → connecting → connected` inmediato; segundo plano y pérdida de conexión (regresión); `SimulatedRobotLink` real (7 ciclos con todo pedido y caída, el primer comando recibido por el "ESP" es STOP); `main.dart` real (al conectar, exactamente 1 envío, STOP, `lastSentSeq == 0`, y a +100 ms el segundo). Todos verdes.
+
+### 3. Prueba de mutación (copia `D:\dev\_mutacion\session_controller.dart.p1.orig`; el árbol ya tenía cambios sin commitear, así que el criterio es: mismo hash y `git diff -- app_android/lib` idéntico al de antes)
+
+Antes: `session_controller.dart` = `D64CF491…3CDE` (igual a la base del coordinador); `git diff -- app_android/lib` sha `BE864C14C05AFC9A568E7D4C0B05C2E4E3A8C33BCB28C7281816D5E395252780`. Cada mutante se aplicó solo, se corrieron los tests del Agente 2 (`test/app test/ui test/widget_test.dart`) y los del auditor (heartbeat, r4, paso1, safety, ui, protocol) y se restauró (hash verificado cada vez: `igual_base=True`).
+
+| Mutante | Qué hace | Tests del Agente 2 | Tests del auditor | Resultado |
+|---|---|---|---|---|
+| **A** (pedido por el usuario) | sin STOP inicial (ni al conectar ni al nacer conectado) | `+43 -9`: "heartbeat envía ~10 comandos…", "seq incrementa…", "no envía sin conexión; arranca al conectar…", "dispose cancela…", "mantener adelante…", "lo pedido pasa a STOP y al reconectar…", "STOP inmediato al conectar", "STOP inmediato en CADA reconexión", "nace ya conectado" | `+55 -22`: **los 6 reescritos fallan** (A1 10 min, A1 50 reconexiones, A3 vuelta, A3 2 vueltas, A3 inmediatos, R4 "pedidos EXPLÍCITOS") **más** R4 "MANUAL pedido enseguida" y los 15 de `paso1` | **DETECTADO**. Ningún reescrito queda trivialmente verde sin el STOP. |
+| **B1** | `_startHeartbeat()` antes de `_sendCurrent()` | `+52` todos verdes | `+77` todos verdes | **SOBREVIVE — mutante equivalente, no hallazgo.** El envío es sincrónico y el primer tick de un `Timer.periodic` solo ocurre 100 ms después: el orden de esas dos líneas no cambia ningún comportamiento observable (mismos envíos, mismos instantes, mismos seq). |
+| **B2** | el STOP se difiere con `scheduleMicrotask` (sale después de la ventana sincrónica) | `+49 -3` (STOP inmediato al conectar, en cada reconexión, "arranca al conectar…") | `+72 -5`: `paso1` sincrónico ×2 (tools false/true), pedidos durante connecting ×2, connected→connecting→connected | **DETECTADO** |
+| **C** | al conectar NO se llama `_resetToSafeStop()` (solo en esa rama) | `+52` verdes | `+77` verdes | **SOBREVIVE — mutante equivalente, no hallazgo.** Se demuestra: el controlador siempre pasa por la rama `!nowConnected` (que sí hace `_stopHeartbeat()` + `_resetToSafeStop()`) antes de volver a `connected`; `requestState`, `pressDirection`, `pulseTurn`, `setCutter` y `setTrimmer` exigen `isConnected`, y `_status` solo cambia en `_onStatus`; un `connected` repetido no entra a la rama (`wasConnected`). No hay camino que llegue a `connected` con algo distinto de STOP pedido: el reset al conectar es defensa en profundidad redundante. (Mientras exista, no hace daño.) |
+| **C2** | además se quita el reset de la rama de pérdida (arrastre real de lo pedido) | `+49 -3` ("lo pedido pasa a STOP y al reconectar arranca en STOP", "STOP inmediato en CADA reconexión", "connecting cuenta como pérdida") | `+70 -7`: R4 "reconexión … 5 ciclos", `paso1` 7 reconexiones ×2, connected→connecting→connected, segundo plano/pérdida, simulador real, `audit_safety` A5 simulador | **DETECTADO** (el arrastre sí se atrapa) |
+| **D** | el STOP inicial lleva `cutter = 1` cuando `toolsEnabled = true` | `+49 -3` | `+64 -13`: R4 ×5, `paso1` con tools true ×6, simulador real, A5 | **DETECTADO** |
+
+Cierre: `session_controller.dart` = `D64CF49105B3B883FF0D5FE497342CB7D5A51474BB152ED1FE1D0D7F09633CDE`; `stop_button.dart` = `34B20869C7BB89F0829639DBD74D0F00672F8F9A2AB7188B3E9AB5BB62D0E3B2`; `git diff -- app_android/lib` sha `BE864C14…2780` = el de antes (`igual=True`).
+
+### 4. Riesgos nuevos buscados con lupa
+
+- **¿Puede salir un no-STOP entre `connected` y el STOP inicial?** No. `_sendCurrent` exige `_status == connected` y `_status` solo se actualiza en `_onStatus`, justo antes del STOP; entre el cambio del enlace y la entrega del aviso (microtarea) el controlador todavía se ve desconectado y descarta los pedidos (test: pedidos en esa ventana y en el instante exacto de `connected`). Con el STOP sincrónico, el primero es STOP incluso con listeners previos.
+- **¿Doble `_startHeartbeat`?** No: `??=` + la rama solo corre al pasar de no-conectado a conectado. `connected` repetido: sin segundo STOP, sin segundo timer (`periodicTimerCount == 1`) y a 10 Hz exactos después. (Informativo: un `connected` duplicado **no** manda un segundo STOP; la pregunta del coordinador asumía que sí, pero el código lo evita. Es lo correcto: no baja lo que el usuario ya pidió.)
+- **`connected → connecting → connected` inmediato:** dos STOP (uno por conexión), un solo timer, nada no-STOP en el medio ni después.
+- **STOP al segundo plano y por pérdida de conexión:** sin cambios (regresión verde: `paused` manda STOP inmediato y el heartbeat sigue en STOP; al caer el enlace no sale nada).
+- **seq:** el STOP consume un seq; continuidad `(n+1) % 65536` verificada a lo largo de 7 reconexiones y 2 vueltas completas.
+- **Observación con BLE real (no hallazgo; BLE no está en la APK):** el STOP sincrónico se pide en el mismo instante en que `BleRobotLink` pasa a `connected`; su cola lo escribe de inmediato (ya no hay "primer tick" de espera: antes ~108 ms, ahora ~6 ms desde el `open()` en `audit_r4_first_command_test`).
+
+### Hallazgos nuevos
+
+Ninguno (AUD-17 no se abre). Sobrevivieron dos mutantes, ambos equivalentes (B1, C), con la demostración arriba.
+
+### Veredicto del Paso 1: **EN VERDE**
+
+La regla se cumple en todas las vías probadas (enlace propio sincrónico y asíncrono, simulador real, `main.dart` real, tools false/true, reconexiones, controlador que nace conectado). Los 6 tests míos reescritos son igual o más estrictos y no quedan triviales sin el STOP. Siguen en cola, sin tocar los documentos: `docs/protocolo_ble_app_esp.md` y `docs/entrega_companero_firmware.md`.
+
+---
+
+## Documentos de entrega BLE — 15/11/26
+
+Solo lectura de `docs/protocolo_ble_app_esp.md` (v1.0), `docs/entrega_companero_firmware.md` (borrador) y las dos frases nuevas de `docs/e7_app_android.md` §3 y §5 (`git diff -- docs/e7_app_android.md`). Contrastados contra la Directiva §3, `e7_app_android.md`, `arquitectura.md`, `pines.md`, `00_estado_actual.md`, `lib/core` (`esp_protocol.dart`, `control_command.dart`, `ble_robot_link.dart`, `simulated_robot_link.dart`) y, solo lectura, `firmware/*/active/active/main/main.c`, `esp32_serial_transport.c`, `bumper_decision_node.py`, `Datasheet/Sabertooth2x25v2.txt` y `.gitignore`. `git status` de `firmware/` y `ros2_ws/`: sin cambios; no edité ningún documento.
+
+**Test propio:** `test/audit/audit_docs_protocol_test.dart` (hash `B10FA99C815D64D03FF8C9111E2CD84D353752276A3BE2438FD6FC891996B477`, 22 tests: 20 verdes y 2 rojos). Genera con `ControlCommand.toJsonLine()` y decodifica con `decodeEspLine`/`parsePolygonLine`/`fromJsonLine` cada fila de las tablas 6.1–6.3, verifica los tamaños en bytes de todos los mensajes, las constantes, los tres UUID y el 300 ms. **Dos rojos a propósito (AUD-19, AUD-20)**; el resto verde.
+
+```
+flutter.bat analyze                       → No issues found! (ran in 3.1s)
+flutter.bat test test/audit --concurrency=1 → 00:40 +138 -2: Some tests failed.   (los 2 rojos: AREA tamaños y CMD-15)
+flutter.bat test --concurrency=1          → 00:55 +310 -2: Some tests failed.   (312 tests = 120 core + 52 app/ui + 140 auditor; 310 verdes y los mismos 2 rojos)
+```
+
+### Verificado sin hallazgo (con evidencia)
+
+- **UUID:** los tres son exactamente `d4d28957-613f-4007-8a1d-1deab4080779` (servicio), `5a38f5bc-797e-4e23-97e6-efc129c921d5` (comando) y `9d803301-5ae6-4c4a-ab5a-8f783c540282` (notificaciones), en la fila correcta de la tabla de §2, y **no hay ningún otro UUID** en los tres documentos (test verde). `BleConfig` sigue con los tres en `null`, y el doc lo dice (§9: "siguen en `null` (PENDIENTE)").
+- **Constantes doc = código:** heartbeat 100 ms, corte 300 ms, buffer 512 B, MTU 517, vértices 3–10, `id` 1–65535, códigos `FMT/NVERT/RANGE/ID/LEN` (verde).
+- **300 ms escrito igual:** ninguna línea de los tres documentos dice "≥ / desde / a partir de / o más 300 ms"; los dos documentos nuevos afirman "300 vale" y "301 corta"; `e7_app_android.md` dice "más de 300 ms" (verde, con búsqueda por expresión regular sobre todas las líneas).
+- **Tamaños correctos:** CMD 71 / 73 / 77 (también el máximo real sobre 64 combinaciones de bordes); ACK 21 / 24; POK 19 / 23; PCLR 13; GPS 40 / 73 / 77; POLY 62 / 290 / 280; PERR 23 / 32 / 42 (máximo real sobre todas las combinaciones de id y código). MTU: ACK/POK ≥ 27 y POLY ≥ 293 son correctos.
+- **Ejemplos aceptados/rechazados por el código real:** CMD-1/2/3/4/18 válidos y CMD-1 regenera la línea exacta; CMD-6…14, 16, 17, 19 rechazados por `fromJsonLine`; ACK-1/2, GPS-1…4, POK y PERR (incluido `id:-1` con `e:"ID"`) como dice §6.2; POLY-1 genera la línea exacta del documento y POLY-2/3/4/5/6 son válidos; POLY-8…20 devuelven el `id` y el código de la tabla (y la app acepta el PERR resultante); POLY-21 (> 512 B) → `LEN` sin id; **POLY-16** (id fuera de int32) → el ESP simulado emite PERR sin id y la app lo recibe (el hallazgo AUD-04 está bien reflejado).
+- **`AREA`:** hoy `decodeEspLine` la ignora (devuelve `null`), tal como dice el documento ("pendiente de la app, segunda APK").
+- **Primer comando = STOP / conexión arranca en STOP** (§5.1, §8.2): es verdad en el código (`session_controller.dart`, `_onStatus`; verificado en el Paso 1).
+- **Citas del paquete del compañero, todas exactas contra el código:** `main.c` del sensor (`APP_CMD_TIMEOUT_US 300000`, tabla de tareas con núcleo/prioridad/stack, v7.0, `ROS_PUBLISH_MS 50`, `UART_NUM_0`, líneas 228–234); `main.c` del motor (`:134-137`, `:517`, `:1062-1065` PIVOT fuerza accesorios, `:1242`, `:1257`, `:1263-1264`, `:1288`, `:1297`, `:1395`, `:1424`, `:81`, `CONFIG_ESP_TASK_WDT=n`, `TRIMMER_SPEED_STOP 64`, `TRIMMER_SPEED_MAX 85`); `bumper_decision_node.py:114` (timer 0,20 s), `:137` (7 campos), `:141-152`, `:232`; `esp32_serial_transport.c:18` (115200); el sensor realmente usa `usb_serial_jtag` y su `main.c` dice "La UART0 es exclusiva de micro-ROS" (la contradicción que el documento señala existe); Sabertooth ~365-370 y ~620-624 (sin timeout en modo microcontrolador; "Serial Timeout" solo en Packetized, apagado y no persistente); `pines.md` (reservas libres `4, 5, 11, 12, 13, 14, 21, 40, 41, 42`; UART0 en 43/44; strapping; sensor en `/dev/ttyACM0`); `00_estado_actual.md` (pendientes (a)–(c), v6.2, Pi 4/Lyrical) y las discrepancias Pi 4/Pi 5, `/dev/ttyUSB0`, "accesorios sin cambios" vs `ERR_IMU` (§9.3 del paquete) son reales. Cálculos: 430 ms de presupuesto y 4/11/25 cm de recorrido; 36 °/s × 20 s = 720°; 180/255 × 16,8 V = 11,9 V. `.gitignore` solo excluye `**/sdkconfig` y `**/sdkconfig.old`; `sdkconfig.defaults` **sí** está versionado (9 archivos): la advertencia de que la clave no puede ir ahí es correcta.
+- **Estado de verificación honesto:** ningún documento afirma algo compilado o probado en banco/piso que no lo esté. El paquete lo declara de entrada ("nada implementado, compilado ni probado en el robot"), distingue compilado / banco / piso en el plan, y dice que la ruta BLE "no se probó nunca con hardware". El contrato se declara **no congelado** (cabecera, §11.1 y registro de cambios) y todo lo no decidido está marcado PROPUESTA/PENDIENTE (nombre `Cortadora-E7`, parámetros de conexión 15–30 ms / latencia 0 / supervisión 2 s, tiempos de bloqueo 5 min / 1 h, 10 fallos, 3 bonds, 2 s de línea parcial, namespace NVS, pin del botón y del desbloqueo, cota de `app_cmd_age_ms`, código de watchdog `feedback = 8`). No hay pines ni valores presentados como decididos.
+- **Paquete del compañero:** cada recomendación lleva etiqueta PREGUNTA / SUPUESTO / PROPUESTA; no asigna a la usuaria tareas del compañero (firmware, Brain, watchdog, banco y piso son del compañero; la usuaria opera la app y decide); no pide nada prohibido: sin tocar firmware, `ros2_ws` ni la PC Linux desde la entrega, sin compilar; las pruebas con cuchilla quedan fuera del plan ("decisión aparte").
+- **Los tres requisitos del 14/11/26** figuran con fecha, entrada y resultado esperado: (1) en `protocolo` §8.1, ST-1…ST-9 (300 vale, 301 corta; AUTO_RUN y AUTO_PAUSE; no reanuda), A-13…A-16; (2) §5.4, AR-3/AR-4/AR-10, A-18; (3) §5.8, AR-1…AR-11, A-17/A-19; el compañero puede objetarlos (§11 pregunta 7, `entrega` C14); la supervivencia a un reinicio es pregunta suya (§11 pregunta 8, C13); la ventana con botón es "RECOMENDACIÓN FUERTE" (`entrega` §3.6, C15).
+- **Seguridad del emparejamiento, afirmaciones técnicas a verificar contra la especificación (no las doy por falsas):** (a) "cada emparejamiento fallido en Passkey Entry revela información de la clave, bit a bit en 20 rondas" y la estimación "decenas de intentos": el documento ya la marca "verificar contra Core Vol. 3, Part H"; puede ser optimista (podría ser menos). (b) "el Passkey Entry legacy es atacable offline por quien solo escucha": coincide con lo publicado sobre emparejamiento legacy; verificar. (c) "Display-only + MITM obligatorio → rechazar Just Works": consistente con el modelo de asociación (DisplayOnly contra un teléfono con teclado da Passkey Entry); verificar que el stack lo imponga. (d) §2 línea 39: la característica de notificaciones se declara "solo Notify (sin Read)" pero las banderas de NimBLE propuestas incluyen `READ_ENC | READ_AUTHEN` (que en NimBLE gobiernan el permiso del CCCD); no es una contradicción demostrada, pero hay que aclararlo con la versión real de ESP-IDF (el documento ya dice "verificar"). (e) "inyectar un passkey aleatorio durante el bloqueo" y "evento de re-emparejamiento": marcadas "verificar". (f) Códigos ATT 0x05 (autenticación) y 0x0F (cifrado): correctos.
+
+### Hallazgos nuevos
+
+| ID | Documento:línea | Qué está mal | Evidencia | Gravedad | Responsable | Estado |
+|---|---|---|---|---|---|---|
+| AUD-17 | `protocolo` §6.5 T-7, §8.1, §8.2, ST-7 (y `entrega` §4.10) | **"No reanuda solo" queda ambiguo cuando el enlace sigue vivo.** Si pasan > 300 ms sin comando pero la conexión BLE no se cae (un tropiezo de radio) y la app, que no se entera, sigue mandando su heartbeat con `state:2`, el siguiente comando es "nuevo y válido" y T-7 dice que el ESP "vuelve a publicar el comando completo (incluido su `state`)": **AUTO_RUN se reanuda solo**, sin que el usuario haga nada. ST-7 solo cubre la reconexión (donde la app manda STOP primero). Además §8.2 dice a la vez "hasta recibir un comando válido" y "el siguiente comando válido, aunque sea `state:2`, recién entonces cambia `app_state`", que no se sabe si exige un STOP antes. El `SessionController` tampoco baja su estado pedido en ese caso. | Lectura: `protocolo` líneas 313 (T-7), 324–325 (ST-6/ST-7), 407 y 415; `session_controller.dart` (solo baja a STOP al perder el estado de enlace o ir a segundo plano). | MEDIA (seguridad: AUTO_RUN) | Agente 1 (documento) + decisión del usuario | ABIERTO |
+| AUD-18 | `protocolo` §5.7, PCLR-1, PCLR-2, A-9 contra §5.8 (2), AR-6, A-19 | **Contradicción interna sobre `PCLR`.** §5.7 y PCLR-1 dicen que el ESP "no responde nada" y A-9 exige "sin notificación"; §5.8 regla 2, AR-6 y A-19 exigen que tras un `PCLR` el ESP mande `{"t":"AREA","id":0}`. Un firmware correcto (con `AREA`) **fallaría** la prueba A-9 del propio documento. | `protocolo` líneas 202, 298, 384 contra 212, 340, 394. | MEDIA (la prueba de aceptación del compañero se contradice) | Agente 1 | ABIERTO |
+| AUD-19 | `protocolo` §5.8 (tamaños), AR-1, AR-2 | **Tamaños de `AREA` mal calculados.** El documento dice 17 B (`id` 0), 19 B (`id` 7) y 23 B (`id` 65535). Los reales son **20 B, 20 B y 24 B** (`"AREA"` tiene una letra más que `"POK"`; parece copiado del cálculo de POK). Con 24 B el mínimo de MTU sin fragmentar sigue en 27 (no cambia el MTU de §4, pero el número del contrato está mal). | `audit_docs_protocol_test.dart` → `AREA (5.8): 17 B (id 0) / 19 B (id 7) / 23 B (id 65535) [E]`: `Expected: <17>  Actual: <20>`. Test rojo a propósito. | BAJA | Agente 1 | ABIERTO |
+| AUD-20 | `protocolo` §5.1, CMD-15 contra `control_command.dart:157-191` | **El parser de referencia acepta la clave duplicada** que el documento exige descartar (`...,"seq":12,"cutter":1}` → `cutter = 1`; `jsonDecode` se queda con la última). El documento llama a CMD-1…POLY-22 "la especificación ejecutable", y el ESP simulado (que usa `fromJsonLine`) no la cumple en esa fila. La app nunca genera duplicados, así que no hay riesgo operativo; sí una divergencia entre contrato y referencia (ya anotada como observación en la Ronda 2). | `audit_docs_protocol_test.dart` → `CMD-15 ... [E]`: `Expected: throws <Instance of 'FormatException'>  Actual: <Closure: () => ControlCommand>`. Rojo a propósito. | BAJA | Agente 1 (código, o documento que aclare que la referencia no detecta duplicados) | ABIERTO |
+| AUD-21 | `e7_app_android.md` §3 (párrafo "Seguridad en el ESP (ya implementada)") | **El encabezado "(ya implementada)" ahora cubre algo que NO está implementado.** La frase nueva (forzar `app_state` a 0 y no reanudar) quedó dentro del mismo párrafo. El firmware real solo pone `app_dir`, `app_cutter` y `app_trimmer` en 0: `main.c` del sensor, líneas 773–777; `app_state` no se toca. El requisito es nuevo y está sin implementar, sin compilar y sin probar. | `firmware/esp32_sensor/active/active/main/main.c:773-777`: `if (app_connected < 0.5f ...) { app_dir = 0.0f; app_cutter = 0.0f; app_trimmer = 0.0f; }`. | MEDIA (afirma implementado algo que no lo está) | Agente 1 | ABIERTO |
+| AUD-22 | `protocolo` §3.5 (2) y §11 ("Para la usuaria" 1), `entrega` §9.1 U1 contra `entrega` §3.6 y C15 | **Dueño de la decisión de la ventana de emparejamiento inconsistente.** El pedido es "recomendación fuerte, decisión del compañero". El paquete lo dice en §3.6 y C15, pero el protocolo la deja como "decisión abierta del usuario" y la lista en las preguntas de la usuaria, y el propio paquete la repite como U1 de la usuaria. | Líneas: `protocolo` 100 y 494; `entrega` 543 (U1) contra 154 y 572 (C15). | BAJA | Agente 1 | ABIERTO |
+| AUD-23 | `entrega` §3.9 y §8.1; `protocolo` §1 línea 18 | Tres desactualizaciones menores: (a) §3.9 manda verificar "A-1 … A-12 y S-1 … S-11" y omite A-13…A-19 (las pruebas de los requisitos nuevos); (b) §8.1 dice "270 tests de la app" y, tras el Paso 1, son 290 en total (idem `00_estado_actual.md` línea 40); (c) §1 del protocolo todavía dice que la app "solo ve GPS, ACK y POK/PERR", sin `AREA`. | Líneas citadas. | BAJA | Agente 1 | ABIERTO |
+| AUD-24 | `lib/core/simulated_robot_link.dart` (`espPublishedCommand`) contra `protocolo` §8.1, ST-2…ST-9, AR-1…AR-10 | **El ESP simulado de referencia no implementa los requisitos del 14/11/26:** en el corte conserva `state` (con AUTO_RUN publica AUTO_RUN; el documento pide 0) y no emite `AREA`. Sí conserva el polígono al desconectar y `PCLR` lo borra (AR-3, AR-6 en lo que le toca). Hoy no afecta a la app (la UI no muestra nada de eso), pero ST-x y AR-x no son ejecutables contra la referencia. | `audit_docs_protocol_test.dart`, caracterización (verde): tras 301 ms con `autoRun`, `pub.state == autoRun`; `link.espPolygonId` conserva 7 al desconectar. | BAJA | Agente 1 (opcional, junto con la segunda APK) | ABIERTO |
+
+#### Correcciones que se piden (los documentos los edita su dueño)
+
+- **AUD-17:** decidir y escribir una regla explícita para el corte con enlace vivo: o el ESP queda "trabado" en STOP hasta recibir un comando con `state:0` (y solo después acepta `state:2`), o se acepta que el siguiente heartbeat lo reanuda y entonces la app debe volver a STOP cuando note el hueco. Agregar el caso a ST-x. Reescribir §8.2 sin ambigüedad. Decide el usuario (seguridad).
+- **AUD-18:** unificar: tras `PCLR` el ESP manda `AREA id:0` (si se mantiene `AREA`); corregir §5.7, PCLR-1/PCLR-2 y A-9, y la nota de la pregunta 6 de la usuaria.
+- **AUD-19:** corregir a 20 / 20 / 24 B (AR-1, AR-2 y §5.8).
+- **AUD-20:** o hacer que el parser de referencia rechace claves duplicadas (comprobación propia sobre el texto), o aclarar en CMD-15 que la referencia de la app no la detecta.
+- **AUD-21:** marcar la frase de `app_state` como "requisito nuevo (14/11/26), **pendiente en el firmware v7.0**" y dejar "(ya implementada)" solo para dir/cutter/trimmer.
+- **AUD-22:** que el protocolo y U1 digan "recomendación fuerte; decide el compañero".
+- **AUD-23:** completar la lista de pruebas, corregir el conteo (290) y el §1.
+- **AUD-24:** opcional.
+
+### Observaciones (sin ID)
+
+- Atribución de los requisitos: el pedido del coordinador atribuye las tres decisiones a "la usuaria"; el protocolo atribuye (1) `app_state → STOP` al **usuario** (§8.1, §11.1) y (2)/(3) a la **usuaria**. Confirmar cuál es la correcta para el requisito (1); no cambia el contenido.
+- Mínimos de MTU (§4, §9): la lista "comando y GPS ≥ 80; ACK y POK ≥ 27" no menciona `PERR` (hasta 42 B, necesita ≥ 45) ni `AREA` (24 B, ≥ 27). No es un error, es una omisión.
+
+### Veredicto por documento
+
+| Documento | Veredicto | Motivo |
+|---|---|---|
+| `docs/protocolo_ble_app_esp.md` | **NO** | AUD-17 (MEDIA, ambigüedad de seguridad en AUTO_RUN), AUD-18 (MEDIA, la prueba A-9 se contradice con `AREA`), AUD-19, AUD-20, AUD-22, AUD-23. Lo demás está sólido: UUID exactos, tamaños y ejemplos verificados contra el código, 300 ms consistente, estado "no congelado" bien declarado. |
+| `docs/entrega_companero_firmware.md` | **EN VERDE** con reservas menores | Citas exactas contra el código, recomendaciones etiquetadas, sin tareas mal asignadas ni acciones prohibidas, sin afirmar nada compilado o probado. Solo hereda AUD-17 (§4.10), AUD-22 (U1 vs C15) y AUD-23 (§3.9, §8.1); no se corrige nada propio fuera de eso. |
+| `docs/e7_app_android.md` (dos frases en §3 y §5) | **NO** | AUD-21 (MEDIA): "(ya implementada)" ahora cubre un requisito que el firmware no tiene. La frase de §5 (conservar el polígono y `AREA`) es correcta y marca claramente que la app aún no la decodifica. |
+---
+
+## Verificación de las correcciones AUD-17…AUD-24, `fromJsonLine` y STOP retenido — 15/11/26
+
+Todo con corrida propia (`R:\app_android`, `--concurrency=1`). No edité documentos ni `lib/`; la mutación se hizo con el protocolo de siempre.
+
+```
+flutter.bat analyze                         → No issues found! (ran in 3.1s)
+flutter.bat test test/core --concurrency=1  → 00:02 +123: All tests passed!      (Agente 1: coincide; incluye sus 3 tests de AUD-20)
+flutter.bat test test/audit --concurrency=1 → 00:41 +147 -3: Some tests failed.   (los 3 rojos = AUD-25)
+flutter.bat test --concurrency=1            → 00:55 +322 -3: Some tests failed.   (325 tests = 123 core + 52 app/ui + 150 auditor)
+```
+
+### Mis dos tests actualizados (por qué)
+
+- `audit_docs_protocol_test.dart`, AUD-19: ya no pega 17/19/23. Calcula `AREA` con `jsonEncode`, lo deriva de forma independiente (POK de un dígito + la diferencia de letras `"AREA"` − `"POK"`; +4 dígitos para 65535) y exige que el documento diga exactamente esos valores calculados (20 B, 20 B, 24 B, en §5.8, AR-1 y AR-2). Se agregó `ESTOP`: la línea `{"t":"ESTOP","why":"T"}\n` mide **24 B** (verdad contra el código; el documento y el paquete dicen 24 B), cabe en MTU 27, y la app hoy la ignora (`decodeEspLine` → `null`), como dicen ambos documentos. Verde.
+- `audit_protocol_test.dart`, "claves extra / duplicada": antes caracterizaba "gana la última". Ahora exige: claves extra se aceptan (también con valores array), y la duplicada se rechaza en el final, al principio y con el mismo valor. No quedó más floja en nada (antes aceptaba el duplicado; ahora lo rechaza y conserva la aceptación de extras). Verde.
+
+### Cambio de código AUD-20 (`_hasDuplicateTopLevelKey`): **NO — hay un bypass (AUD-25)**
+
+Revisé el escáner línea por línea y lo ataqué con casos dirigidos y 9000 objetos aleatorios (semillas fijas) en `audit_dupkeys_test.dart` (nuevo, hash `09B50C172833FC0E…`, 11 tests).
+
+- **Funciona** (verde): duplicadas de primer nivel de las 7 claves del contrato, desconocidas, en cualquier posición, con distinto valor y con el mismo valor, con valores escalar/string/array/objeto; claves anidadas repetidas NO se rechazan (ni dentro de arrays de objetos); lo que parece clave pero está dentro de un string (`"\"cutter\":1"`), strings con `{ [ : ,`, string que termina en `\\`, claves que difieren por mayúsculas o por un espacio final, espacios, tabuladores, `\r\n` y saltos alrededor de los separadores; JSON inválido, `{}`, `[]`, vacío, truncado: `FormatException` sin colgarse; 3000 objetos aleatorios SIN duplicados (por el significado de JSON) con extras y duplicados anidados: siempre aceptados con los campos intactos; 3000 con duplicados escritos igual: siempre rechazados; `toJsonLine` byte a byte y ida y vuelta en 4·5·5·4 = 400 combinaciones.
+- **No funciona — AUD-25:** el escáner compara el **texto crudo** de la clave, pero `jsonDecode` compara claves **decodificadas**. `"cutter"` y `"cut\u0074er"` son la MISMA clave para JSON y gana la última, así que la línea `{"t":"CMD",…,"cutter":0,…,"cut\u0074er":1}` **se acepta con `cutter = 1`**. Fue exactamente la clase de ataque que describe el requisito. Evidencia: `audit_dupkeys_test.dart` → `clave duplicada escrita con escape \u … [E]` (`BYPASS: la línea se acepta con cutter = 1`; precondición verificada: `jsonDecode(...)['cutter'] == 1`); `escape de la primera aparición y de ambas [E]` (cinco variantes: en `t`, `cutter` en la primera o en las dos apariciones, `trimmer`, `seq`); y la propiedad con 3000 líneas aleatorias con duplicado por escape: **3000 de 3000 aceptadas** (ejemplo: `{"dir":1,"cu\u0074\u0074\u0065\u0072":0,"trimmer":0,…,"cutter":0,"seq":12}`).
+
+**Prueba de mutación** (copia `D:\dev\_mutacion\control_command.dart.dup.orig`): se quitó el `if (_hasDuplicateTopLevelKey(line)) throw …`.
+
+```
+antes:     control_command.dart = 7681FA8631F39B0055C807DA0E9B56E0DA7C49E31C5CFA34AA0999DB7B232368
+           git diff -- app_android/lib → sha BC313ABC664900CDBFCC589C96A54E7C788C01C165343F71F781ED4826B30B00
+mutante:   test/core                  → +70 -1: ... clave duplicada (AUD-20) una clave de primer nivel repetida se rechaza [E]
+           audit (dupkeys/docs/protocol) → +41 -7: dupkeys (casos dirigidos, 2 propiedades), docs "CMD-15", protocol "claves extra... duplicada" [E]
+después:   control_command.dart = 7681FA86…2368  igual=True
+           git diff -- app_android/lib → sha BC313ABC…0B00  igual=True
+```
+**Mutante DETECTADO** por 1 test del Agente 1 (los otros dos de AUD-20 solo comprueban aceptación y no pueden detectarlo) y por 7 míos. Regresión: `esp_protocol.dart` no cambió (`git diff` solo toca `control_command.dart`), `decodeEspLine` y `toJsonLine` sin cambios de comportamiento (tests de `test/core`, `audit_docs_protocol_test` y el bloque "regresión" de dupkeys, todos verdes).
+
+### Verificación de los documentos (lectura de `protocolo_ble_app_esp.md`, `entrega_companero_firmware.md` y `e7_app_android.md`)
+
+| Hallazgo anterior | Estado | Evidencia |
+|---|---|---|
+| AUD-17 (reanudación con enlace vivo) | **CERRADO** (la regla quedó escrita; ver AUD-26 por una ambigüedad nueva) | §6.5 requisito 2, ST-1…ST-12, §5.9, §8.1: tras un corte > 300 ms (300 vale, 301 corta) en AUTO_RUN/AUTO_PAUSE queda STOP retenido, no reanuda con `state:2/3` frescos hasta un `state:0` y un AUTO posterior, también con el enlace vivo; T-7 ya distingue MANUAL. |
+| AUD-18 (PCLR vs AREA) | **CERRADO** | §5.7, PCLR-1/PCLR-2 y A-9 ahora exigen `AREA id:0` (coherente con §5.8 regla 2, AR-6, A-19). Residual → AUD-27. |
+| AUD-19 (tamaños AREA) | **CERRADO** | 20/20/24 B en §5.8, AR-1, AR-2 y el paquete (`20–24 B`); verificado por mi test con valores calculados. |
+| AUD-20 (CMD-15) | **ABIERTO** → AUD-25 | el rechazo funciona para duplicados escritos igual y falla con escapes `\u`. |
+| AUD-21 (`e7` §3 "ya implementada") | **CERRADO** | el encabezado ahora dice "ya implementada solo para `app_dir`, `app_cutter` y `app_trimmer`" y marca el forzado de `app_state` y el STOP retenido como PENDIENTES (el v7.0 no lo hace; coincide con `main.c:773-777`). |
+| AUD-22 (dueño de la ventana) | **CERRADO** con una observación | §3.5, §11 (pregunta 1 de la usuaria), §11.1 y el paquete (U1, C15) dicen "recomendación fuerte; decide el compañero". Observación: §11.1, última fila, aún agrupa la ventana en "Abiertos (usuaria/compañero)". |
+| AUD-23 (desactualizaciones) | **PARCIAL** | (a) §3.9 ahora dice A-1…A-22; (b) el conteo de tests se reemplazó por una referencia a AUDITORIA.md; **(c) NO corregido:** `protocolo` §1 (línea 18) todavía dice que la app "solo ve GPS, ACK de comandos y POK/PERR" (sin `AREA` ni `ESTOP`). |
+| AUD-24 (simulador) | **CERRADO** (documentado) | §8.1 "Pendiente de la app (simulador)", §11.1 y paquete 5c: el simulador no fuerza `state`, no retiene y no emite `AREA`/`ESTOP`, y no es referencia de estos requisitos. |
+
+**Comprobaciones pedidas sobre el STOP retenido:**
+- **ESTOP:** 24 B verificado. `why` es un carácter; `T` = timeout; `D` reservado y no se envía (coherente en §5.9, 5.9 punto 1 y 2, y ST-6/ST-7, que cubren la desconexión sin aviso). El formato figura como **PROPUESTA pendiente de la usuaria** en §5.9, §11.1, §9 y paquete (líneas 46 y 135); ningún documento lo da por decidido.
+- **MANUAL:** pregunta abierta en §8.1, §11 pregunta 9, §11.1, T-7, ST-11, A-22 y paquete C16; la recomendación (no retener) está marcada "no es decisión" y se dan sus riesgos.
+- **300 ms:** igual en todos lados (mi test sobre los tres documentos sigue verde: ninguna línea dice ≥ / desde / a partir de 300 ms; se afirma "300 vale, 301 corta").
+- **Atribución:** las decisiones del 14/11/26 figuran "de la usuaria" en §5.9, §6.5, §8.1, §11, §11.1, `e7` §3 y el paquete; el único "usuario" con 14/11 que quedó en el paquete es la decisión previa "opción A" (robot quieto), que es otra decisión.
+- **Lo pendiente de la app está listado:** decodificar `AREA` y `ESTOP`, guardar polígonos, reaccionar (STOP + volver a pedir AUTO + mandar `state:0` antes de AUTO), y que el simulador no emula el corte ni `AREA` (§5.8, §5.9, §9, §11.1, paquete 5a/5b/5c).
+- **Documentos no afirman lo no probado:** §8.1 marca "Estado en el firmware: PENDIENTE DE IMPLEMENTAR"; el paquete sigue declarando que nada está implementado, compilado ni probado.
+
+### Hallazgos nuevos
+
+| ID | Archivo:línea | Qué está mal | Evidencia | Gravedad | Responsable | Estado |
+|---|---|---|---|---|---|---|
+| AUD-25 | `lib/core/control_command.dart` `_hasDuplicateTopLevelKey` (~l.216-245) y `protocolo` §5.1 línea 143 | **Bypass de la clave duplicada con escapes `\uXXXX`.** El escáner compara texto crudo; JSON compara claves decodificadas. `"cut\u0074er":1` después de `"cutter":0` se acepta con `cutter = 1`. Además el protocolo afirma que la referencia "ya rechaza las claves duplicadas de primer nivel" y que el firmware "debe hacer lo mismo": como está escrito, un firmware que imite ese escáner heredaría el agujero. Es un parser de referencia (la app nunca genera duplicados), pero es justo el vector que el requisito quería cerrar (herramientas). | `audit_dupkeys_test.dart`: 3 rojos (`BYPASS: la línea se acepta con cutter = 1`; 5 variantes; 3000/3000 aceptadas). Control: sin mutante, los demás 8 tests de ese archivo pasan. | **ALTA** (seguridad: herramientas) | Agente 1 | ABIERTO |
+| AUD-26 | `protocolo` §8.1 (párrafo "El robot NO reanuda solo…") y §8.2 contra ST-9 y §6.5 requisito 2 | **Regla del primer comando ambigua.** §8.1 dice que `app_state` queda en 0 "hasta recibir un comando nuevo y válido"; §8.2 dice que "el siguiente comando válido, aunque sea `state:2`, recién entonces cambia `app_state`"; ST-9 dice que AUTO solo se acepta después de un `state:0` válido **en la conexión**. Con una conexión que arranca con `state:1` y sigue con `state:2` (sin `state:0`), §8.2 y ST-9 dan resultados distintos. Falta una frase única: "AUTO exige un `state:0` previo en cada conexión (y tras cada STOP retenido)" o la regla contraria. | `protocolo` líneas 436, 450 y 350. | MEDIA (seguridad: AUTO) | Agente 1 (decide la usuaria) | ABIERTO |
+| AUD-27 | `protocolo` §5.7 contra PCLR-3 | §5.7 dice "un PCLR mal formado o **con otra clave**: sin respuesta"; PCLR-3 dice que `{"t":"PCLR","x":1}` "claves desconocidas se ignoran: se procesa como PCLR-1" (con respuesta `AREA`). Se contradicen sobre qué es "otra clave". | líneas 202 y 316. | BAJA | Agente 1 | ABIERTO |
+
+Observaciones sin ID: `protocolo` §1 línea 18 (AUD-23c, sigue abierto, BAJA, Agente 1); §11.1 última fila aún lista la ventana de emparejamiento entre los "Abiertos (usuaria/compañero)"; la lista de pruebas de §7 está desordenada (A-13…A-16, A-20…A-22, A-17…A-19) y A-4 no menciona `16 = 0`.
+
+### Veredictos
+
+| Entregable | Veredicto | Motivo |
+|---|---|---|
+| Cambio de código AUD-20 (`fromJsonLine`) | **NO** | AUD-25 (ALTA): el chequeo se evade con escapes `\u`. Lo demás es sólido y la mutación lo detecta. |
+| `docs/protocolo_ble_app_esp.md` | **NO** | AUD-25 (la afirmación de §5.1), AUD-26 (MEDIA), AUD-23c y AUD-27 (BAJAs). AUD-17/18/19/22/24 quedaron bien resueltos; STOP retenido, `ESTOP`, MANUAL y la atribución están correctos. |
+| `docs/entrega_companero_firmware.md` | **EN VERDE** | Coherente con el protocolo (retención, `ESTOP` como propuesta, MANUAL abierto, pendientes de la app, A-1…A-22, ventana "decide el compañero"). Hereda la ambigüedad AUD-26. |
+| `docs/e7_app_android.md` | **EN VERDE** | AUD-21 corregido: "ya implementada" acotado a dir/cutter/trimmer y lo nuevo marcado pendiente. |
+---
+
+## Verificación de AUD-25…AUD-27 y observaciones AUD-22/23 — 15/11/26
+
+Todo con corrida propia (`R:\app_android`, `--concurrency=1`). No edité documentos ni `lib/`.
+
+```
+flutter.bat analyze                         → No issues found! (ran in 3.2s)
+flutter.bat test test/core --concurrency=1  → 00:02 +125: All tests passed!
+flutter.bat test test/audit --concurrency=1 → 00:42 +164: All tests passed!   (incluye "AUD-25 propiedad: aceptados=3000 rechazados=3000 discrepancias=0")
+flutter.bat test --concurrency=1            → 01:03 +341: All tests passed!   (341 = 125 core + 52 app/ui + 164 auditor)
+```
+
+### Conteo de `audit_dupkeys_test.dart` (discrepancia 10 vs 11)
+
+Contado por mí con `Select-String '^\s+test\('`: **10 tests** (6 en "casos dirigidos", 3 en "propiedad", 1 en "regresión"). Mi cifra de 11 fue un **error de conteo mío**; no se perdió ningún test. Pruebas: el hash del archivo no cambió (`09B50C172833FC0E…`, el mismo de la verificación anterior) y el total de la suite cuadra (140 del auditor antes de ese archivo + 10 = 150, y 150 + 7 de `audit_docs2` + 7 de `audit_dupkeys2` = 164).
+
+### AUD-25 — `_hasDuplicateTopLevelKey`: **CERRADO** (código EN VERDE)
+
+El escáner ahora decodifica cada clave de primer nivel con `jsonDecode` del literal. Mis tres rojos anteriores (`BYPASS …`, 5 variantes, 3000/3000) pasan, y agregué un oráculo independiente.
+
+- **`audit_dupkeys2_test.dart` (nuevo, 7 tests, hash `DBE7C85DE60DAA05…`).** Tokenizador JSON escrito a mano (sin `jsonDecode` ni el escáner del código; decodifica `\uXXXX` en minúscula y mayúscula, `\/`, `\"`, `\\`, `\b\f\n\r\t` y pares sustitutos). Propiedad: **6000 objetos aleatorios** (mitad con duplicado forzado; claves difíciles: vacía `""`, `" "`, `"a b"`, `ñ`, `é`, emoji, `a"b`, `a\b`, `a/b`, `T`, `Cutter`, `"cutter "`, salto de línea, `U+2028`; cada clave escrita con codificaciones mezcladas; valores con `{ : "` dentro de strings, arrays y objetos anidados con las **mismas** claves repetidas; espacios y saltos): la decisión de `fromJsonLine` coincide con la del oráculo en **6000/6000** (aceptados 3000, rechazados 3000, **0 discrepancias**). Otra propiedad: 3000 con duplicado por escape se rechazan todos; 3000 sin duplicado se aceptan todos. Casos dirigidos: `cut\u0074er` (el ejemplo del documento), dos escapadas entre sí, `tri\u006dmer`/`tri\u006Dmer` y entre sí (minúscula vs mayúscula), clave escapada por completo, `seq` escapada, `t` escapada, `\/`, `\"`, `\\`, par sustituto escapado contra el literal 😀 y contra el escapado en minúscula, clave vacía duplicada, espacios iguales con escape, y **`cut\u0054er` NO duplica** (es "cutTer") junto con espacios distintos y `""` vs `" "` (aceptadas); duplicados anidados y strings con llaves/comillas/`\\` final: aceptados; JSON truncado/`{}`/`[…]`/inválido: `FormatException` sin colgarse.
+- **Prueba de mutación** (copia `D:\dev\_mutacion\control_command.dart.dup2.orig`; el árbol tiene cambios sin commitear, así que el criterio es hash y `git diff -- app_android/lib` iguales a los de antes de mutar).
+
+```
+antes:  control_command.dart = EBDFACD5C8DB2E05FF8F0DCBDCB3A71FC0B6167CEF686D23B920A27594FE01A4
+        git diff -- app_android/lib → sha F3CAB73A7D2814CF10EBF644D07D53507492CFF4DE7520B00D5E3CEBC59E2B90
+M1 (quitar el chequeo):          test/core  → +70 -3  (clave duplicada AUD-20, "disfrazados con escapes", "\/ \" y pares sustitutos")
+                                 audit      → +44 -11 (dupkeys ×5, dupkeys2 ×4, docs CMD-15, protocol claves duplicadas)
+M2 (comparar el texto CRUDO):    test/core  → +71 -2  ("disfrazados con escapes", "\/ \" y pares sustitutos")
+                                 audit      → +48 -7  (dupkeys ×3, dupkeys2 ×4)
+después: control_command.dart = EBDFACD5…01A4  igual=True
+         git diff -- app_android/lib → sha F3CAB73A…2B90  igual=True
+```
+Ambos mutantes **detectados** por tests del agente y por los míos (M2 solo por los casos con escape, que es lo esperable: el texto crudo funciona para duplicados escritos igual). Regresión: `git diff` solo toca `control_command.dart` (`esp_protocol.dart` sin cambios), `toJsonLine` byte a byte y ida y vuelta de 400 combinaciones verdes (bloque "regresión" de `audit_dupkeys_test`), `decodeEspLine` sin cambios (`audit_docs_protocol_test`, `test/core` verdes).
+
+### Documentos
+
+| Hallazgo | Estado | Evidencia |
+|---|---|---|
+| AUD-26 (una sola regla) | **CERRADO** | §8.1 "**Regla única (la de ST-9):** tras cualquier corte de más de 300 ms o desconexión, el ESP queda en STOP retenido y solo vuelve a aceptar AUTO después de un `state:0` válido"; §8.2 la aplica ("`state:2` como primer comando se mantiene en 0"); ST-9 coincide; las frases viejas ("comando nuevo y válido" suelto, "aunque sea `state:2`, recién entonces cambia") desaparecieron; MANUAL sigue como pregunta abierta 9 (§8.1, §8.2, T-7, ST-11, A-22, §11.1). Test `audit_docs2_test.dart` verde. |
+| AUD-27 (§5.7 y PCLR-3) | **CERRADO** | §5.7: "Un PCLR con claves desconocidas se procesa igual (PCLR-3); un PCLR mal formado o sin `\n`: sin respuesta"; PCLR-3 dice lo mismo. |
+| AUD-23 (c) | **CERRADO** | §1 línea 18: "…GPS, ACK, POK/PERR y los dos mensajes agregados el 14/11/26: `AREA` y `ESTOP`". (AUD-23 queda cerrado entero: a y b ya estaban.) |
+| AUD-22 (observación) | **CERRADO** | §11.1 tiene fila propia ("RECOMENDACIÓN fuerte; la decisión es del compañero de firmware (no está abierta para la usuaria)") y la fila agregada de "Abiertos" ya no menciona la ventana; paquete U1 y C15 coherentes. |
+| §5.1 frase nueva + CMD-15b | **VERIFICADO** | Extraje el ejemplo del texto del documento: `{"t":"CMD","state":1,"dir":1,"speed":50,"cutter":0,"trimmer":0,"seq":12,"cut\u0074er":1}`; `jsonDecode` lo lee con `cutter = 1` y `fromJsonLine` lo **rechaza** (= "ninguna respuesta", igual que CMD-15); con `cut\u0074er` escrita **una sola vez** es válido y da `cutter = 1` (como dice el documento); duplicados anidados no se rechazan; CMD-15b está en la tabla. Test verde. |
+
+**Relectura completa del protocolo** (584 líneas) buscando contradicciones nuevas introducidas por la edición: ST-1…ST-12, §6.5, T-7, §8.1–§8.3, AREA, ESTOP, PCLR, §11/§11.1 y A-13…A-22 son coherentes entre sí; el 300 ms se escribe igual en todos lados (mi test sobre los tres documentos, verde); las decisiones del 14/11/26 se atribuyen a la usuaria; el formato de `ESTOP` y MANUAL siguen como propuesta/pregunta abierta; lo pendiente de la app (decodificar `AREA`/`ESTOP`, guardar polígonos, simulador) sigue listado. El paquete del compañero es coherente con el protocolo (retención, `ESTOP` propuesta, MANUAL abierto, A-1…A-22, ventana "decisión tuya", pendientes 5a/5b/5c). Solo encontré dos asuntos menores y uno de redacción:
+
+| ID | Documento:línea | Qué está mal | Gravedad | Responsable | Estado |
+|---|---|---|---|---|---|
+| AUD-28 | `protocolo` §8.1 (regla única) contra el párrafo "STOP retenido en AUTO", T-7, ST-11 y 5.9 | La regla única dice "tras **cualquier** corte … solo vuelve a aceptar AUTO tras un `state:0`", pero el resto del documento habla del corte **en AUTO**. No dice qué pasa tras un corte **en MANUAL**: ¿un `state:2` posterior (la usuaria pasa de MANUAL a AUTO_RUN sin pasar por STOP) queda ignorado? ¿se manda `ESTOP`? Es lo más conservador, pero la app no sabría por qué el ESP lo ignora si no hay aviso. | BAJA | Agente 1 (decide la usuaria junto con la pregunta 9) | ABIERTO |
+| AUD-29 | `entrega` §3.5 (línea 144) y §4.10 (línea 305) | (a) §3.5 recomienda detectar duplicados "recorriendo la lista de hijos" de cJSON o un parser propio, pero no dice que hay que comparar las claves **decodificadas** (exactamente el defecto que tuvo la referencia, AUD-25); con cJSON ya vienen decodificadas, con un parser propio no. (b) §4.10 todavía dice que `app_state` "queda en 0 hasta un comando nuevo y válido", la formulación que AUD-26 corrigió en el protocolo. | BAJA | Agente 1 | ABIERTO |
+
+### Veredictos
+
+| Entregable | Veredicto | Motivo |
+|---|---|---|
+| `lib/core/control_command.dart` (AUD-25) | **EN VERDE** | 6000/6000 concordancias con un oráculo independiente; casos dirigidos pedidos todos correctos; mutantes M1 y M2 detectados; restaurado con hash y `git diff` idénticos; regresión sin cambios. |
+| `docs/protocolo_ble_app_esp.md` | **EN VERDE** | AUD-26/27/23c/22 corregidos y ejemplo de §5.1 verdadero contra el código real. Solo la observación AUD-28 (BAJA). |
+| `docs/entrega_companero_firmware.md` | **EN VERDE** | Coherente con el protocolo; solo la observación AUD-29 (BAJA). |

@@ -63,7 +63,7 @@ La APP **pide**; la **Raspberry decide**. La Raspberry conserva la autoridad fin
 | 22 | `app_cmd_age_ms` | antigüedad del último comando; `-1` = nunca llegó |
 | 23 | `app_polygon_id` | id del área vigente en el ESP; `0` = ninguna |
 
-**Seguridad en el ESP (ya implementada):** si `app_connected = 0`, si nunca llegó comando o si el último tiene más de 300 ms (`APP_CMD_TIMEOUT_US`), el ESP publica `app_dir`, `app_cutter` y `app_trimmer` en `0`.
+**Seguridad en el ESP (ya implementada solo para `app_dir`, `app_cutter` y `app_trimmer`; el forzado de `app_state` y el STOP retenido son requisitos PENDIENTES de implementar en el firmware):** si `app_connected = 0`, si nunca llegó comando o si el último tiene más de 300 ms (`APP_CMD_TIMEOUT_US`), el ESP publica `app_dir`, `app_cutter` y `app_trimmer` en `0`. **Decisión de la usuaria (14/11/26), requisito pendiente de implementar en el firmware (el v7.0 no lo hace):** en esos mismos casos el ESP también fuerza `app_state` a `0` (STOP), incluso desde AUTO_RUN o AUTO_PAUSE; tras un corte en AUTO queda en **STOP retenido** y no reanuda con comandos frescos hasta recibir un `state:0` y un AUTO posterior; y **no reanuda solo** al reconectar (detalle en `docs/protocolo_ble_app_esp.md` §8.1). **Decisión de la usuaria (14/11/26):** el polígono vigente (`app_polygon_id`) **no se borra** al desconectarse ni por este corte.
 
 **Valor esperado sin APP:** índices 15–23 = `0, 0, 0, 0, 0, 0, 0, -1, 0`.
 
@@ -76,6 +76,8 @@ La APP **pide**; la **Raspberry decide**. La Raspberry conserva la autoridad fin
 - La APP manda el comando a **10 Hz siempre que esté conectada**, aunque no se apriete nada (`dir = 0`). Así la Raspberry distingue "suelto" de "conexión caída".
 - Formato JSON exacto del mensaje de comando por Bluetooth: **a definir en la fase 2**. Debe transportar los campos de los índices 16–21.
 
+> **Detalle completo, UUID, seguridad del enlace y casos de prueba: `docs/protocolo_ble_app_esp.md` (v1.0, pendiente de revisión de la usuaria y del compañero de firmware; no está congelado hasta que ambos lo confirmen).**
+>
 > **PROPUESTA (no decidida, a congelar con el firmware)** — implementada en `app_android/lib/core/` (`control_command.dart`, `esp_protocol.dart`).
 >
 > - **Comando (APP → ESP):** una línea JSON terminada en `\n`, sin espacios, claves en este orden, todo enteros:
@@ -124,6 +126,8 @@ JSON, un mensaje por línea:
 | `PERR` | ESP → APP | Rechazado (formato exacto a definir en la fase 3) |
 | `{"t":"PCLR"}` | APP → ESP | Borrar el área |
 
+> **Ver también `docs/protocolo_ble_app_esp.md` §5.6 (v1.0, pendiente de revisión; no congelado).** **Decisión de la usuaria (14/11/26):** el polígono vigente se conserva al desconectar (solo lo reemplaza un `POLY` o lo borra un `PCLR`), y el ESP informa el área activa a la app con un mensaje nuevo ESP → APP, `{"t":"AREA","id":N}` (`id` 0 = sin área), al activar las notificaciones y cada vez que cambia (§5.8 de ese documento). La app todavía no lo decodifica (pendiente, segunda APK).
+>
 > **PROPUESTA (no decidida) — formato de `PERR`:** `{"t":"PERR","id":N,"e":"<código>"}`. `id` se omite si el ESP no pudo leerlo (ej. `{"t":"PERR","e":"FMT"}`). El ESP valida el `id` antes que el resto: con `e` ≠ `ID` el `id` siempre está en `1`–`65535`; con `e` = `ID` es el eco del id inválido recibido (solo si cabe en int32). La APP descarta mensajes ESP → APP con valores fuera de rango (id, `seq`, `fix` < 0, lat/lon fuera de ±90°/±180°).
 >
 > | `e` | Causa |

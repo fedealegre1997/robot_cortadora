@@ -309,14 +309,26 @@ void main() {
       }
     });
 
-    test('(caracterización) parser de CMD: claves extra se aceptan y clave duplicada = gana la última',
+    // AUD-20 (corregido en la ronda de documentos): antes esta caracterización
+    // decía "clave duplicada = gana la última" (cutter 1). Ahora el parser de
+    // referencia la RECHAZA; las claves extra siguen aceptándose.
+    test('parser de CMD: claves extra se aceptan; clave duplicada (cualquier posición y valor) se rechaza',
         () {
       const dup =
           '{"t":"CMD","state":1,"dir":1,"speed":50,"cutter":0,"trimmer":0,"seq":12,"cutter":1}';
-      expect(ControlCommand.fromJsonLine(dup).cutter, 1);
+      expect(() => ControlCommand.fromJsonLine(dup), throwsFormatException);
+      const dupFirst =
+          '{"cutter":1,"t":"CMD","state":1,"dir":1,"speed":50,"cutter":0,"trimmer":0,"seq":12}';
+      expect(() => ControlCommand.fromJsonLine(dupFirst), throwsFormatException);
+      const dupSame =
+          '{"t":"CMD","state":1,"dir":1,"speed":50,"cutter":0,"trimmer":0,"seq":12,"seq":12}';
+      expect(() => ControlCommand.fromJsonLine(dupSame), throwsFormatException);
       const extra =
           '{"t":"CMD","state":1,"dir":1,"speed":50,"cutter":0,"trimmer":0,"seq":12,"x":9}';
       expect(ControlCommand.fromJsonLine(extra).seq, 12);
+      const extra2 =
+          '{"t":"CMD","state":1,"dir":1,"speed":50,"cutter":0,"trimmer":0,"seq":12,"x":9,"y":[1,2]}';
+      expect(ControlCommand.fromJsonLine(extra2).cutter, 0);
     });
 
     test('decodeEspLine: valores fuera de rango del contrato/propuesta se descartan', () {

@@ -164,6 +164,11 @@ class ControlCommand {
     if (decoded is! Map<String, dynamic>) {
       throw FormatException('CMD: se esperaba un objeto JSON', line);
     }
+    // jsonDecode deja ganar a la ÚLTIMA clave duplicada (`"cutter":0,…,"cutter":1`
+    // daría cutter 1): ambiguo y peligroso, se descarta la línea entera.
+    if (_hasDuplicateTopLevelKey(line)) {
+      throw FormatException('CMD: clave duplicada', line);
+    }
     final map = decoded;
     if (map['t'] != jsonType) {
       throw FormatException('CMD: "t" debe ser "$jsonType"', line);
@@ -206,6 +211,43 @@ class ControlCommand {
   @override
   String toString() => 'ControlCommand(state: ${state.name}, dir: ${dir.name}, '
       'speed: $speed, cutter: $cutter, trimmer: $trimmer, seq: $seq)';
+}
+
+/// true si el objeto JSON de [json] repite una clave de primer nivel, comparando
+/// las claves ya decodificadas (escapes `\uXXXX`, `\/`, `\"`, pares
+/// sustitutos). Los duplicados anidados no cuentan. Se llama
+/// solo con texto que `jsonDecode` ya aceptó como objeto válido, así que basta
+/// recorrer los caracteres siguiendo la profundidad y las cadenas.
+bool _hasDuplicateTopLevelKey(String json) {
+  final keys = <String>{};
+  var depth = 0;
+  var expectKey = false;
+  for (var i = 0; i < json.length; i++) {
+    final c = json[i];
+    if (c == '"') {
+      final start = i + 1;
+      i = start;
+      while (json[i] != '"') {
+        if (json[i] == r'\') i++; // salta el carácter escapado
+        i++;
+      }
+      if (depth == 1 && expectKey) {
+        // Clave DECODIFICADA (`"cutter"` == `"cutter"`), como la compara
+        // jsonDecode; el literal ya es válido porque jsonDecode lo aceptó.
+        final key = jsonDecode(json.substring(start - 1, i + 1)) as String;
+        if (!keys.add(key)) return true;
+        expectKey = false;
+      }
+    } else if (c == '{' || c == '[') {
+      depth++;
+      expectKey = depth == 1 && c == '{';
+    } else if (c == '}' || c == ']') {
+      depth--;
+    } else if (c == ',' && depth == 1) {
+      expectKey = true;
+    }
+  }
+  return false;
 }
 
 /// Contador de secuencia 0–65535 que da la vuelta a 0.

@@ -640,3 +640,18 @@ Este documento es un registro inmutable (append-only) de cada acción, experimen
   - Firmware BLE del ESP (fase 2).
   - Segunda APK con mapa y editor (fase 6).
   - Propuesta opcional del auditor: enviar un STOP inmediato al pasar a `connected`.
+
+## [14–15/11/26] - Pasos 1 y 2 de la cadena de control (app, protocolo BLE)
+- **Paso 1:** STOP inmediato al conectar.
+  - Cambio en `session_controller.dart` de 2 líneas. Los tests de la app pasaron a 11 envíos por segundo (STOP inicial más 10 ticks).
+  - 6 tests del auditor se reescribieron con aserciones iguales o más estrictas (diff en `AUDITORIA.md`) y se agregaron 17 tests.
+  - Mutantes A, B2, C2 y D detectados. B1 y C sobrevivieron por ser equivalentes: el orden de dos líneas no es observable, y el reset al conectar es redundante porque la rama de pérdida ya lo hace.
+- **Paso 2:** el documento del protocolo pasó por 3 rondas del auditor (AUD-17 a AUD-29).
+  - AUD-17 (ambigüedad de reanudación en AUTO con el enlace vivo) se resolvió con la decisión de la usuaria "retener STOP + aviso".
+  - AUD-18/21/27: contradicciones internas (PCLR, estado "ya implementada" del forzado de `app_state`).
+  - AUD-19: tamaños de `AREA` mal calculados (17/19/23 contra 20/20/24 bytes reales).
+  - AUD-25 (ALTA): el escáner de claves duplicadas comparaba el texto crudo; `"cut\u0074er":1` se aceptaba con `cutter = 1` (3000 de 3000 casos aleatorios). Se corrigió comparando claves decodificadas, y se verificó con un tokenizador independiente (6000 de 6000 coincidencias) y con 2 mutantes.
+- **Aprendizaje:** el parser de referencia de un contrato necesita un oráculo independiente: con `jsonDecode` solo, la ambigüedad de claves duplicadas pasaba inadvertida.
+- **Descartado:** cargar los UUID en `BleConfig` ahora. Habría desbloqueado `connect()` sin firmware. El mensaje `AREA` sin implementar en la app: queda para la segunda APK.
+- **Entorno:** `D:\dev\env_flutter.ps1` falló al montar `R:` por la "é" en PowerShell 5.1; se arregló armando la ruta con `[char]0x00E9`.
+- **Pendiente:** revisión de la usuaria y del compañero del contrato BLE; pregunta de MANUAL (AUD-28); respuestas del compañero (sensor v7.0, transporte USB/COM, intercambio de placas, polígono tras reinicio).
