@@ -1,1 +1,7 @@
-idf_component_register(SRCS "main.c" "esp32_serial_transport.c" INCLUDE_DIRS "")
+if(MOTOR_PULSE_TEST)
+    idf_component_register(SRCS "motor_pulse_test.c" INCLUDE_DIRS "" REQUIRES driver esp_timer)
+elseif(MOTOR_DIAGNOSTICS)
+    idf_component_register(SRCS "motor_diagnostics.c" INCLUDE_DIRS "" REQUIRES driver esp_timer)
+else()
+    idf_component_register(SRCS "main.c" "esp32_serial_transport.c" INCLUDE_DIRS "")
+endif()

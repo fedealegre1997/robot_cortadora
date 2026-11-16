@@ -1,1 +1,6 @@
-idf_component_register(SRCS "main.c" "esp32_serial_transport.c" INCLUDE_DIRS "")
+if(SENSOR_DIAGNOSTICS)
+    idf_component_register(SRCS "main.c" INCLUDE_DIRS "" REQUIRES driver esp_timer)
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE SENSOR_DIAGNOSTICS=1)
+else()
+    idf_component_register(SRCS "main.c" "esp32_serial_transport.c" INCLUDE_DIRS "")
+endif()

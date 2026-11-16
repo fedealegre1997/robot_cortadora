@@ -63,8 +63,8 @@
 static const int pines_diag[] = {1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18,
                                  21, 38, 39, 40, 41, 42, 47, 48};
 #else
-#define I2C_MASTER_SDA_IO   GPIO_NUM_21
-#define I2C_MASTER_SCL_IO   GPIO_NUM_22
+#define I2C_MASTER_SDA_IO   GPIO_NUM_27     // cableado definitivo ESP32 motor
+#define I2C_MASTER_SCL_IO   GPIO_NUM_14
 static const int pines_diag[] = {4, 13, 14, 18, 19, 21, 22, 23, 25, 26, 27, 32, 33};
 #endif
 #define I2C_MASTER_NUM      I2C_NUM_0

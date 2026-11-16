@@ -1,3 +1,10 @@
 build
 sdkconfig
 sdkconfig.old
+build_diagnostics/
+sdkconfig.diagnostics
+sdkconfig.diagnostics.old
+
+build_pulse_test/
+sdkconfig.pulse_test
+sdkconfig.pulse_test.old
