@@ -1,303 +1,370 @@
 # ------------------------------------------------------------
-# Codigo Main Nodo Principal de Toma de Decisiones
-# Funcion:
-#   - Recibe datos del nodo de sensores desde el topic "sensores"
-#   - Analiza estados de los finales de carrera
-#   - Envia ordenes de movimiento al nodo de motores
+# Brain v3.0 — Nodo principal de toma de decisiones
 #
-# Topic de sensores esperado:
-#   [bumper_izq, bumper_centro, bumper_der,
-#    ultra_izq, ultra_centro, ultra_der,
-#    roll, pitch, yaw,
-#    gps_lat, gps_lon, gps_alt, gps_fix]
+# Protocolo v4.0 del motor (sin encoders, rumbo con IMU).
 #
-# Logica actual:
-#   - Espera datos del nodo de motores y del nodo de sensores
-#   - Inicia avance continuo
-#   - Si se activa cualquier bumper durante el avance:
-#       1) envia STOP
-#       2) cuando el STOP termina, envia retroceso temporizado
-#       3) cuando el retroceso termina, vuelve a avanzar
+# motion_cmd  = [cmd_id, modo, param, bordeadora_on, cortadora_on]
+# motion_status = [cmd_id, estado, pwm_izq, pwm_der, feedback,
+#                  rumbo, rumbo_obj, imu_estado, seg_desde_cal]
 #
-# Nombre: sensor_decision_node.py
-# Version: 2.0
-# Fecha: 23/04/2026
+# sensores (24 valores):
+#   0-2   bumpers (izq, centro, der)
+#   3-5   ultrasonidos cm
+#   6-8   roll, pitch, yaw
+#   9-14  GPS
+#   15-23 APP
+#
+# Lógica:
+#   1. Esperar sensores + motor listos
+#   2. Calibrar IMU (5 s)
+#   3. Avanzar recto continuo a FORWARD_SPEED cm/s, con CORTADORA + BORDEADORA encendidas
+#   4. Reacción a obstáculo → STOP → retroceder (REVERSE_TIME_S) → girar → avanzar:
+#        - bumper DERECHO   → giro 90° IZQUIERDA
+#        - bumper IZQUIERDO → giro 90° DERECHA (espejo)
+#        - bumper CENTRAL   → giro 180° (izquierda)
+#        - ultrasónico CENTRAL < ULTRA_STOP_CM → giro 90° IZQUIERDA
+#
+# Versión: 3.1
+# Fecha: 2026-11-15
 # Autor: Angel Alegre
 # ------------------------------------------------------------
-
-import math
-from typing import List
 
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
-
 from std_msgs.msg import Float32MultiArray, Int32MultiArray
 
 
-class SensorDecisionNode(Node):
-    # Estados devueltos por el ESP32 motor
-    STATE_IDLE = 0
-    STATE_ACCEPTED = 1
-    STATE_EXECUTING = 2
-    STATE_DONE = 3
-    STATE_ABORTED = 4
-    STATE_ERROR = 5
+# Modos del protocolo v4
+MODE_STOP = 0
+MODE_ADELANTE = 1
+MODE_ATRAS = 2
+MODE_GIRO_IZQ = 3
+MODE_GIRO_DER = 4
+MODE_PIVOT = 5
+MODE_CALIBRAR = 6
+MODE_FIJAR_RUMBO = 7
 
-    # Convencion logica compartida con el nodo motor
-    DIR_REVERSE = 0
-    DIR_FORWARD = 1
+# Estados del motor
+ST_IDLE = 0
+ST_ACCEPTED = 1
+ST_EXECUTING = 2
+ST_DONE = 3
+ST_ABORTED = 4
+ST_ERROR = 5
+
+# IMU estados
+IMU_FALLA = 0
+IMU_INICIANDO = 1
+IMU_LISTO = 2
+IMU_RECALIBRANDO = 3
+
+
+class BrainNode(Node):
+
+    FORWARD_SPEED = 15      # cm/s
+    REVERSE_SPEED = 15      # cm/s
+    REVERSE_TIME_S = 2.0    # segundos de retroceso (controlado por timer, motor continuo)
+    TURN_DEGREES = 90       # grados del giro lateral (bumper izq/der, ultrasonico)
+    TURN_DEGREES_CEN = 180  # grados del giro con bumper central (media vuelta)
+    ULTRA_STOP_CM = 30      # distancia del ultrasonico CENTRAL para reaccionar (cm)
+    START_GRACE_S = 3.0     # tras arrancar, ignorar bumpers/ultrasonico estos segundos
+    # Accesorios en operacion normal (CUIDADO: la cuchilla gira)
+    CORTADORA = 1           # cortadora principal encendida
+    BORDEADORA = 1          # bordeadora encendida
 
     def __init__(self):
-        super().__init__('sensor_decision_node')
+        super().__init__('brain_node')
 
-        # ----------------------------------------------------
-        # Parametros de prueba / ajuste rapido
-        # ----------------------------------------------------
-        self.forward_pwm = 80
-        self.reverse_pwm = 80
-        self.reverse_time_ms = 3000
-
-        # ----------------------------------------------------
-        # QoS
-        # ----------------------------------------------------
+        # --- QoS ---
         sensor_qos = QoSProfile(
-            history=HistoryPolicy.KEEP_LAST,
-            depth=10,
-            reliability=ReliabilityPolicy.BEST_EFFORT
+            history=HistoryPolicy.KEEP_LAST, depth=10,
+            reliability=ReliabilityPolicy.BEST_EFFORT,
         )
-
         default_qos = QoSProfile(
-            history=HistoryPolicy.KEEP_LAST,
-            depth=10
+            history=HistoryPolicy.KEEP_LAST, depth=10,
         )
 
-        # ----------------------------------------------------
-        # Subs / pubs
-        # ----------------------------------------------------
-        self.sensores_sub = self.create_subscription(
-            Float32MultiArray,
-            'sensores',
-            self.sensores_callback,
-            sensor_qos
-        )
+        # --- Subs / Pubs ---
+        self.create_subscription(
+            Float32MultiArray, '/sensores',
+            self.sensores_cb, sensor_qos)
+        self.create_subscription(
+            Int32MultiArray, '/motion_status',
+            self.status_cb, default_qos)
+        self.cmd_pub = self.create_publisher(
+            Int32MultiArray, '/motion_cmd', default_qos)
 
-        self.motion_status_sub = self.create_subscription(
-            Int32MultiArray,
-            'motion_status',
-            self.motion_status_callback,
-            default_qos
-        )
-
-        self.motion_cmd_pub = self.create_publisher(
-            Int32MultiArray,
-            'motion_cmd',
-            default_qos
-        )
-
-        # ----------------------------------------------------
-        # Estado interno
-        # ----------------------------------------------------
-        self.motor_ready = False
-        self.sensor_ready = False
-        self.started = False
-
-        self.mode = 'INIT'
+        # --- Estado ---
         self.next_cmd_id = 1
         self.pending_cmd_id = None
+        self.state = 'WAIT_READY'
+        self.sensor_ready = False
+        self.motor_ready = False
+        self.imu_estado = IMU_FALLA
 
+        self.bumpers = [0, 0, 0]
         self.bumpers_armed = True
-        self.last_sensores: List[float] = []
-        self.last_bumpers = [0, 0, 0]
+        # Giro pendiente segun el disparador (modo + grados)
+        self.pending_turn_modo = MODE_GIRO_IZQ
+        self.pending_turn_deg = self.TURN_DEGREES
+        # Bandera de arranque: la secuencia espera el bumper DERECHO para largar
+        self.start_time_run = None
 
-        # Timer principal
-        self.main_timer = self.create_timer(0.20, self.main_loop)
+        self.reverse_timer = None
+        self.cmd_sent_time = None
+        self.CMD_TIMEOUT = 10.0
+        self.startup_time = self.get_clock().now()
+        self.STARTUP_DELAY = 8.0  # esperar que la IMU se estabilice
+        self.cal_attempts = 0
+        self.MAX_CAL_ATTEMPTS = 5
 
-        self.get_logger().info('Nodo sensor_decision_node iniciado')
+        self.create_timer(0.2, self.tick)
+        self.get_logger().info('Brain v3.1 iniciado — esperando sensores y motor')
 
-    # ========================================================
-    # Helpers de comandos
-    # ========================================================
-    def new_cmd_id(self) -> int:
+    # --------------------------------------------------------
+    # Publicar comando
+    # --------------------------------------------------------
+    def send_cmd(self, modo, param=0, bordeadora=0, cortadora=0):
         cmd_id = self.next_cmd_id
         self.next_cmd_id += 1
+        msg = Int32MultiArray()
+        msg.data = [cmd_id, modo, param, bordeadora, cortadora]
+        self.cmd_pub.publish(msg)
+        self.pending_cmd_id = cmd_id
+        self.cmd_sent_time = self.get_clock().now()
+        self.get_logger().info(
+            f'CMD #{cmd_id} → modo={modo} param={param} bord={bordeadora} cort={cortadora}')
         return cmd_id
 
-    def publish_motion_cmd(
-        self,
-        cmd_id: int,
-        l_dir: int,
-        l_pwm: int,
-        r_dir: int,
-        r_pwm: int,
-        duration_ms: int,
-        bordeadora_on: int = 0
-    ):
-        msg = Int32MultiArray()
-        msg.data = [cmd_id, l_dir, l_pwm, r_dir, r_pwm, duration_ms, bordeadora_on]
-        self.motion_cmd_pub.publish(msg)
-        self.get_logger().info(f'CMD -> id={cmd_id}, data={list(msg.data)}')
-
-    def send_forward_continuous(self):
-        cmd_id = self.new_cmd_id()
-        self.publish_motion_cmd(
-            cmd_id,
-            self.DIR_FORWARD, self.forward_pwm,
-            self.DIR_FORWARD, self.forward_pwm,
-            0,
-            1  # Bordeadora ON
-        )
-        self.mode = 'FORWARDING'
-        self.pending_cmd_id = None
-        self.get_logger().info('Estado -> FORWARDING')
-
-    def send_stop(self):
-        cmd_id = self.new_cmd_id()
-        # En el nodo motor, STOP se detecta por PWM = 0 en ambos lados
-        self.publish_motion_cmd(cmd_id, 0, 0, 0, 0, 1, 0) # Bordeadora OFF
-        self.mode = 'WAIT_STOP_DONE'
-        self.pending_cmd_id = cmd_id
-        self.get_logger().info(f'Estado -> WAIT_STOP_DONE (cmd_id={cmd_id})')
-
-    def send_reverse_timed(self):
-        cmd_id = self.new_cmd_id()
-        self.publish_motion_cmd(
-            cmd_id,
-            self.DIR_REVERSE, self.reverse_pwm,
-            self.DIR_REVERSE, self.reverse_pwm,
-            self.reverse_time_ms,
-            0  # Bordeadora OFF por seguridad
-        )
-        self.mode = 'WAIT_REVERSE_DONE'
-        self.pending_cmd_id = cmd_id
-        self.get_logger().info(f'Estado -> WAIT_REVERSE_DONE (cmd_id={cmd_id})')
-
-    # ========================================================
-    # Callback sensores
-    # ========================================================
-    def sensores_callback(self, msg: Float32MultiArray):
-        data = list(msg.data)
-
-        if len(data) < 3:
-            self.get_logger().warn(f'sensores inválido: {data}')
+    # --------------------------------------------------------
+    # Callbacks
+    # --------------------------------------------------------
+    def sensores_cb(self, msg: Float32MultiArray):
+        d = list(msg.data)
+        if len(d) < 6:          # bumpers (0-2) + ultrasonidos (3-5)
             return
-
         self.sensor_ready = True
-        self.last_sensores = data
+        self.bumpers = [
+            1 if d[0] >= 0.5 else 0,   # izquierdo
+            1 if d[1] >= 0.5 else 0,   # central
+            1 if d[2] >= 0.5 else 0,   # derecho
+        ]
+        ultra_cen = d[4]        # ultrasonico central (cm; <=0 = sin lectura)
 
-        # Convencion actual del firmware:
-        # data[0] = bumper izquierdo
-        # data[1] = bumper centro
-        # data[2] = bumper derecho
-        left = 1 if data[0] >= 0.5 else 0
-        center = 1 if data[1] >= 0.5 else 0
-        right = 1 if data[2] >= 0.5 else 0
+        any_bumper = any(b == 1 for b in self.bumpers)
+        if not any_bumper:
+            self.bumpers_armed = True   # re-armar al soltar todos
 
-        self.last_bumpers = [left, center, right]
-        any_active = (left == 1 or center == 1 or right == 1)
-
-        # Rearmado cuando todos vuelven a cero
-        if not any_active:
-            self.bumpers_armed = True
+        # Bandera de arranque: esperar el bumper DERECHO para largar la secuencia
+        if self.state == 'WAIT_START':
+            if self.bumpers[2] and self.bumpers_armed:
+                self.bumpers_armed = False
+                self.start_time_run = self.get_clock().now()
+                self.get_logger().info('Bumper derecho → arranca la secuencia de movimiento')
+                self.transition('FORWARDING')
             return
 
-        # Solo reaccionar si estamos avanzando
-        if self.mode != 'FORWARDING':
+        if self.state != 'FORWARDING':
             return
 
-        # Evitar múltiples disparos con el mismo contacto sostenido
-        if not self.bumpers_armed:
+        # Gracia inicial: los primeros START_GRACE_S ignorar disparadores
+        if self.start_time_run is not None:
+            elapsed = (self.get_clock().now() - self.start_time_run).nanoseconds / 1e9
+            if elapsed < self.START_GRACE_S:
+                return
+
+        # Elegir el giro segun el disparador. Prioridad:
+        #   central (180) > derecho (90 izq) > izquierdo (90 der) > ultrasonico (90 izq)
+        trigger = None
+        if any_bumper and self.bumpers_armed:
+            if self.bumpers[1]:
+                trigger = (MODE_GIRO_IZQ, self.TURN_DEGREES_CEN, 'bumper central')
+            elif self.bumpers[2]:
+                trigger = (MODE_GIRO_IZQ, self.TURN_DEGREES, 'bumper derecho')
+            elif self.bumpers[0]:
+                trigger = (MODE_GIRO_DER, self.TURN_DEGREES, 'bumper izquierdo')
+        if trigger is None and 0 < ultra_cen < self.ULTRA_STOP_CM:
+            trigger = (MODE_GIRO_IZQ, self.TURN_DEGREES,
+                       f'ultrasonico central {ultra_cen:.0f}cm')
+
+        if trigger is None:
             return
 
-        self.bumpers_armed = False
+        if any_bumper:
+            self.bumpers_armed = False
+        self.pending_turn_modo, self.pending_turn_deg, razon = trigger
+        lado = 'IZQ' if self.pending_turn_modo == MODE_GIRO_IZQ else 'DER'
+        self.get_logger().warning(
+            f'Obstaculo: {razon} → retroceso + giro {self.pending_turn_deg}° {lado}')
+        self.transition('STOPPING')
 
-        self.get_logger().warn(
-            f'Bumper activado -> left={left}, center={center}, right={right}'
-        )
-
-        self.send_stop()
-
-    # ========================================================
-    # Callback estado motores
-    # ========================================================
-    def motion_status_callback(self, msg: Int32MultiArray):
-        data = list(msg.data)
-
-        if len(data) < 7:
-            self.get_logger().warn(f'motion_status inválido: {data}')
+    def status_cb(self, msg: Int32MultiArray):
+        d = list(msg.data)
+        if len(d) < 9:
             return
-
-        cmd_id = int(data[0])
-        state = int(data[1])
-        remaining_ms = int(data[6])
-
         self.motor_ready = True
+        cmd_id = d[0]
+        estado = d[1]
+        self.imu_estado = d[7]
 
-        if state in (self.STATE_DONE, self.STATE_ABORTED, self.STATE_ERROR):
+        imu_nombres = {0: 'FALLA', 1: 'INICIANDO', 2: 'LISTO', 3: 'RECALIBRANDO'}
+        if not hasattr(self, '_last_imu_log') or self.imu_estado != self._last_imu_log:
             self.get_logger().info(
-                f'STATUS -> id={cmd_id}, state={state}, remaining={remaining_ms}'
-            )
+                f'Motor status: imu={imu_nombres.get(self.imu_estado, "?")}({self.imu_estado})')
+            self._last_imu_log = self.imu_estado
 
-        if self.pending_cmd_id is None:
+        if self.pending_cmd_id is None or cmd_id != self.pending_cmd_id:
             return
 
-        if cmd_id != self.pending_cmd_id:
-            return
+        if estado == ST_DONE:
+            self.on_cmd_done()
+        elif estado == ST_ERROR:
+            feedback = d[4]
+            self.get_logger().error(f'Motor ERROR cmd #{cmd_id}, feedback={feedback}')
+            self.on_cmd_error()
 
-        if state == self.STATE_DONE:
-            if self.mode == 'WAIT_STOP_DONE':
-                self.pending_cmd_id = None
-                self.send_reverse_timed()
+    # --------------------------------------------------------
+    # Máquina de estados
+    # --------------------------------------------------------
+    def transition(self, new_state):
+        self.get_logger().info(f'Estado: {self.state} → {new_state}')
+        self.state = new_state
 
-            elif self.mode == 'WAIT_REVERSE_DONE':
-                self.pending_cmd_id = None
-                self.send_forward_continuous()
-
-        elif state == self.STATE_ERROR:
-            self.get_logger().error(
-                f'El ESP32 motor devolvió ERROR para cmd_id={cmd_id}'
-            )
+        if new_state == 'WAIT_START':
             self.pending_cmd_id = None
-            self.mode = 'INIT'
+            self.get_logger().info(
+                '>>> Listo. Tocá el BUMPER DERECHO para arrancar la secuencia <<<')
 
-    # ========================================================
-    # Lazo principal
-    # ========================================================
-    def main_loop(self):
-        # Esperar ambos nodos
-        if not self.motor_ready:
+        elif new_state == 'CALIBRATING':
+            self.send_cmd(MODE_CALIBRAR, 5)
+
+        elif new_state == 'FORWARDING':
+            self.pending_cmd_id = None
+            self.send_cmd(MODE_ADELANTE, self.FORWARD_SPEED,
+                          bordeadora=self.BORDEADORA, cortadora=self.CORTADORA)
+            self.pending_cmd_id = None  # avance continuo, no esperamos DONE
+
+        elif new_state == 'STOPPING':
+            self.send_cmd(MODE_STOP,
+                          bordeadora=self.BORDEADORA, cortadora=self.CORTADORA)
+
+        elif new_state == 'REVERSING':
+            self.send_cmd(MODE_ATRAS, self.REVERSE_SPEED,
+                          bordeadora=self.BORDEADORA, cortadora=self.CORTADORA)
+            self.reverse_timer = self.create_timer(
+                self.REVERSE_TIME_S, self.reverse_timeout, callback_group=None)
+
+        elif new_state == 'TURNING':
+            self.send_cmd(self.pending_turn_modo, self.pending_turn_deg,
+                          bordeadora=self.BORDEADORA, cortadora=self.CORTADORA)
+
+    def on_cmd_done(self):
+        self.pending_cmd_id = None
+
+        if self.state == 'CALIBRATING':
+            self.get_logger().info('Calibración IMU completada')
+            self.transition('WAIT_START')
+
+        elif self.state == 'STOPPING':
+            self.transition('REVERSING')
+
+        elif self.state == 'WAIT_REVERSE_STOP':
+            self.transition('TURNING')
+
+        elif self.state == 'TURNING':
+            self.transition('FORWARDING')
+
+    def on_cmd_error(self):
+        self.pending_cmd_id = None
+        if self.state == 'CALIBRATING':
+            self.cal_attempts += 1
+            if self.cal_attempts >= self.MAX_CAL_ATTEMPTS:
+                self.get_logger().warning(
+                    f'Calibración falló {self.cal_attempts} veces, sin calibrar')
+                self.transition('WAIT_START')
+            else:
+                self.get_logger().warning(
+                    f'Calibración falló (intento {self.cal_attempts}/{self.MAX_CAL_ATTEMPTS}), '
+                    'reintentando en 5 s... ¡Robot debe estar QUIETO!')
+                self._retry_timer = self.create_timer(5.0, self.retry_calibration)
+        elif self.state == 'TURNING':
+            self.get_logger().warning('Giro falló (IMU no calibrada), saltando giro → avanzar')
+            self.transition('FORWARDING')
+        else:
+            self.get_logger().error(f'Error en estado {self.state}, enviando STOP')
+            self.send_cmd(MODE_STOP)
+            self.state = 'WAIT_READY'
+
+    def retry_calibration(self):
+        if hasattr(self, '_retry_timer') and self._retry_timer:
+            self._retry_timer.destroy()
+            self._retry_timer = None
+        self.transition('CALIBRATING')
+
+    def reverse_timeout(self):
+        if self.reverse_timer:
+            self.reverse_timer.destroy()
+            self.reverse_timer = None
+        if self.state == 'REVERSING':
+            self.get_logger().info('Retroceso completado (timeout)')
+            self.send_cmd(MODE_STOP,
+                          bordeadora=self.BORDEADORA, cortadora=self.CORTADORA)
+            self.state = 'WAIT_REVERSE_STOP'
+
+    # --------------------------------------------------------
+    # Tick principal
+    # --------------------------------------------------------
+    def tick(self):
+        if self.state == 'WAIT_READY':
+            if self.sensor_ready:
+                elapsed = (self.get_clock().now() - self.startup_time).nanoseconds / 1e9
+                if elapsed < self.STARTUP_DELAY:
+                    return
+                if self.imu_estado >= IMU_LISTO:
+                    self.get_logger().info('IMU lista → calibrando')
+                    self.transition('CALIBRATING')
+                else:
+                    self.get_logger().info(
+                        f'IMU no lista (estado={self.imu_estado}), sin calibrar')
+                    self.transition('WAIT_START')
             return
 
-        if not self.sensor_ready:
-            return
+        # Timeout: si hay comando pendiente sin respuesta, reenviar
+        if (self.pending_cmd_id is not None and self.cmd_sent_time is not None
+                and self.state in ('CALIBRATING', 'STOPPING', 'WAIT_REVERSE_STOP', 'TURNING')):
+            elapsed = (self.get_clock().now() - self.cmd_sent_time).nanoseconds / 1e9
+            if elapsed > self.CMD_TIMEOUT:
+                self.get_logger().warning(
+                    f'Timeout ({self.CMD_TIMEOUT}s) en estado {self.state}, reenviando...')
+                self.transition(self.state)
 
-        # Arranque inicial
-        if not self.started:
-            self.started = True
-            self.send_forward_continuous()
-
-    # ========================================================
-    # Parada segura opcional
-    # ========================================================
-    def send_stop_if_possible(self):
+    # --------------------------------------------------------
+    # Parada segura
+    # --------------------------------------------------------
+    def emergency_stop(self):
         try:
-            self.publish_motion_cmd(9999, 0, 0, 0, 0, 1, 0)
+            msg = Int32MultiArray()
+            msg.data = [9999, MODE_STOP, 0, 0, 0]
+            self.cmd_pub.publish(msg)
         except Exception:
             pass
 
 
 def main(args=None):
     rclpy.init(args=args)
-    node = SensorDecisionNode()
-
+    node = BrainNode()
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
-        node.get_logger().info('Interrupción por teclado, cerrando nodo...')
+    except (KeyboardInterrupt, rclpy.executors.ExternalShutdownException):
+        pass
     finally:
-        node.send_stop_if_possible()
-        node.destroy_node()
-        rclpy.shutdown()
+        try:
+            node.emergency_stop()
+            node.destroy_node()
+            rclpy.try_shutdown()
+        except Exception:
+            pass
 
 
 if __name__ == '__main__':

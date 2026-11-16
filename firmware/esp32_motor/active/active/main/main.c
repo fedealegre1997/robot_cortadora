@@ -105,8 +105,8 @@
 // Derecha (M2)
 #define M2_IN1_PIN   GPIO_NUM_25
 #define M2_IN2_PIN   GPIO_NUM_26
-#define IMU_SDA_PIN  GPIO_NUM_21
-#define IMU_SCL_PIN  GPIO_NUM_22
+#define IMU_SDA_PIN  GPIO_NUM_27
+#define IMU_SCL_PIN  GPIO_NUM_14
 #endif
 
 // =====================================================
@@ -164,7 +164,7 @@
 // =====================================================
 // Perfil: rampa hasta la velocidad de crucero y desaceleracion en los ultimos grados.
 // El PWM = adelanto del modelo + PI; el PI empuja mas si la carga frena el giro (pasto).
-#define GIRO_W_DPS          36.0f   // crucero en el lugar (v3: 20 RPM por rueda = 36 °/s)
+#define GIRO_W_DPS          110.0f  // crucero del giro -> PWM base ~60% (153/255). (antes 36 = ~25%)
 #define SWING_W_DPS         18.0f   // crucero del swing del PIVOT (v3: rueda der a 20 RPM)
 #define GIRO_W_MIN_DPS      8.0f    // velocidad en la aproximacion final
 #define GIRO_DECEL_DEG      15.0f   // grados antes del objetivo donde empieza a desacelerar
@@ -199,7 +199,7 @@
 // IMU — placa 3 (clon de MPU de 6 ejes)
 // =====================================================
 #define I2C_MASTER_NUM      I2C_NUM_0
-#define I2C_MASTER_FREQ_HZ  100000
+#define I2C_MASTER_FREQ_HZ  50000       // 50 kHz: a 100 kHz el bus glitchea en rafagas con este clon y cable largo (pull-ups internos). Medido con motor_diagnostics 2026-11-15
 #define I2C_TIMEOUT         pdMS_TO_TICKS(50)
 
 #define MPU_ADDR_AD0_0      0x68
@@ -238,10 +238,10 @@
 
 // Recalibracion en las paradas (afinado 02/11/26, docs/pruebas.md §3)
 #define RECAL_S                 5           // ventana: p95 del error a 60 s de 0,34-0,46°
-#define RECAL_QUIETO_DPS        1.0f        // giro sin bias por debajo de esto en los 3 ejes...
+#define RECAL_QUIETO_DPS        1.5f        // giro sin bias por debajo de esto en los 3 ejes (subido de 1,0: piso de ruido del clon ~0,8 dps, picos aislados pasaban 1,0)...
 #define RECAL_QUIETO_PREVIO_US  1000000     // ...durante este tiempo antes de calibrar
 #define RECAL_ESPERA_MAX_MS     10000       // CALIBRAR: tiempo extra para quedar quieto
-#define RECAL_RUIDO_MAX_DPS     0.5f
+#define RECAL_RUIDO_MAX_DPS     1.0f        // piso de ruido de este clon medido ~0,82 dps @125Hz (motor_diagnostics 15/11/26); 0,5 lo rechazaba siempre
 #define RECAL_TENDENCIA_MAX_DPS 0.015f      // ~3 sigma de la diferencia entre mitades de 2,5 s
 #define RECAL_SALTO_MAX_DPS     0.03f       // el bias normal cambia ~0,002-0,013 dps en minutos
 #define RECAL_CAMBIO_ACEL_G     0.03f       // cambio de gravedad (~1,7°) = otra inclinacion
@@ -446,11 +446,12 @@ static void apply_motor_command(int32_t l_dir, int32_t l_pwm, int32_t r_dir, int
         pwm_write(CH_M2_IN1, 0);
         pwm_write(CH_M2_IN2, 0);
     } else if (r_dir == DIR_FORWARD) {
-        pwm_write(CH_M2_IN1, 0);
-        pwm_write(CH_M2_IN2, (uint32_t)r_pwm);
-    } else {
+        // Corregido segun prueba fisica: IN1 impulsa hacia adelante la rueda derecha.
         pwm_write(CH_M2_IN1, (uint32_t)r_pwm);
         pwm_write(CH_M2_IN2, 0);
+    } else {
+        pwm_write(CH_M2_IN1, 0);
+        pwm_write(CH_M2_IN2, (uint32_t)r_pwm);
     }
 }
 
@@ -1340,7 +1341,10 @@ void micro_ros_task(void * arg)
         TOPIC_MOTION_STATUS
     ));
 
-    RCCHECK(rclc_subscription_init_default(
+    // Los comandos usan best-effort en XRCE. La confirmacion real la hace la
+    // aplicacion mediante cmd_id en motion_status (ACCEPTED/DONE/ERROR), lo que
+    // evita que un ACK de transporte perdido bloquee el enlace serial.
+    RCCHECK(rclc_subscription_init_best_effort(
         &motion_cmd_subscriber,
         &node,
         ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Int32MultiArray),
@@ -1354,7 +1358,10 @@ void micro_ros_task(void * arg)
     if (motion_cmd_msg.data.data == NULL) {
         vTaskDelete(NULL);
     }
-    motion_cmd_msg.data.size = CMD_LEN;
+    // En recepcion, size lo completa el deserializador; capacity describe el
+    // espacio reservado. Inicializar size en cero permite detectar mensajes
+    // truncados sin conservar la longitud del mensaje anterior.
+    motion_cmd_msg.data.size = 0;
     motion_cmd_msg.data.capacity = CMD_LEN;
     for (size_t i = 0; i < CMD_LEN; i++) {
         motion_cmd_msg.data.data[i] = 0;

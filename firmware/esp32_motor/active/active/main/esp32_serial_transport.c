@@ -44,11 +44,23 @@ bool esp32_serial_close(struct uxrCustomTransport * transport){
 size_t esp32_serial_write(struct uxrCustomTransport* transport, const uint8_t * buf, size_t len, uint8_t * err){
     size_t * uart_port = (size_t*) transport->args;
     const int txBytes = uart_write_bytes(*uart_port, (const char*) buf, len);
-    return txBytes;
+    if (txBytes < 0) {
+        if (err != NULL) *err = 1;
+        return 0;
+    }
+    if (err != NULL) *err = 0;
+    return (size_t)txBytes;
 }
 
 size_t esp32_serial_read(struct uxrCustomTransport* transport, uint8_t* buf, size_t len, int timeout, uint8_t* err){
     size_t * uart_port = (size_t*) transport->args;
-    const int rxBytes = uart_read_bytes(*uart_port, buf, len, timeout / portTICK_PERIOD_MS);
-    return rxBytes;
+    TickType_t ticks = pdMS_TO_TICKS(timeout);
+    if (timeout > 0 && ticks == 0) ticks = 1;
+    const int rxBytes = uart_read_bytes(*uart_port, buf, len, ticks);
+    if (rxBytes < 0) {
+        if (err != NULL) *err = 1;
+        return 0;
+    }
+    if (err != NULL) *err = 0;
+    return (size_t)rxBytes;
 }

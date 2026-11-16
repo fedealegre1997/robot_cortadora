@@ -1,12 +1,12 @@
 //  Firmware ESP32-S3 — Adquisicion de Sensores con micro-ROS
-//  Placa: ESP32-S3-WROOM-1 N8R2 (8MB Flash)
+//  Placa: ESP32-S3-WROOM-1 N16R8 (confirmado por el usuario)
 //  Solo publica, no suscribe ningun topic.
 //
 //  Sensores incluidos:
-//      * Finales de Carrera (x3, GPIO 38, 2, 37)
-//      * MPU-6500 — IMU (I2C, GPIO 6 SDA / 7 SCL, dir 0x69)
+//      * Finales de Carrera (x3, GPIO 38, 2, 39)
+//      * MPU-6500 — IMU (I2C, GPIO 6 SDA / 7 SCL, dir 0x68)
 //      * Ultrasonicos HC-SR04 (x3, TRIG: 18,8,17 — ECHO: 16,9,15)
-//      * GPS FSTR2 (UART2, GPIO 35 RX / 36 TX, 9600 baud)
+//      * GPS FSTR2 (UART2, GPIO 4 RX / 5 TX, 9600 baud)
 //
 //  Protocolo de publicacion:
 //      Topic: /sensores | Float32MultiArray | reliable, 50 ms | 24 valores
@@ -30,7 +30,7 @@
 //      Core 1: bumper_task (10 ms), imu_task (10 ms), micro_ros_task (50 ms)
 //      Datos compartidos entre tareas mediante variables globales con mutex.
 //
-//  NOTA: No usar printf() en ninguna tarea. La UART0 es exclusiva de micro-ROS.
+//  NOTA: USB-Serial-JTAG es exclusivo de micro-ROS; no habilitar consola USB.
 //
 //  Version: 7.0 — port a ESP32-S3 N8R2 (pines segun docs/pines.md §1)
 //  Fecha: 13/11/2026
@@ -56,7 +56,9 @@
 #include "esp_timer.h"
 #include "esp_log.h"
 #include "esp_system.h"
+#include "sensor_nmea.h"
 
+#ifndef SENSOR_DIAGNOSTICS
 #include <rcl/rcl.h>
 #include <rcl/error_handling.h>
 #include <rclc/rclc.h>
@@ -75,12 +77,18 @@
     } \
 }
 
+#endif // !SENSOR_DIAGNOSTICS
+
+#ifdef SENSOR_DIAGNOSTICS
+#include "hal/usb_serial_jtag_ll.h"
+#endif
+
 // --- Configuración General ---
 #define SENSORES_SIZE       24
 
 #define PIN_B_L             GPIO_NUM_38
 #define PIN_B_C             GPIO_NUM_2
-#define PIN_B_R             GPIO_NUM_37
+#define PIN_B_R             GPIO_NUM_39
 
 #define TRIG_IZQ            GPIO_NUM_18
 #define ECHO_IZQ            GPIO_NUM_16
@@ -99,8 +107,8 @@
 
 // --- GPS ---
 #define GPS_UART_NUM        UART_NUM_2
-#define GPS_TX_PIN          GPIO_NUM_36
-#define GPS_RX_PIN          GPIO_NUM_35
+#define GPS_TX_PIN          GPIO_NUM_5
+#define GPS_RX_PIN          GPIO_NUM_4
 #define GPS_BAUD_RATE       9600
 #define GPS_BUF_SIZE        256
 #define GPS_STALE_US        3000000LL   // 3 s
@@ -113,7 +121,7 @@
 #define I2C_MASTER_SCL_IO   GPIO_NUM_7
 #define I2C_MASTER_NUM      I2C_NUM_0
 #define I2C_MASTER_FREQ_HZ  100000
-#define MPU_ADDR            0x69
+#define MPU_ADDR            0x68
 #define MPU_PWR_MGMT_1      0x6B
 #define MPU_ACCEL_XOUT_H    0x3B
 #define ACCEL_SENS          16384.0f
@@ -122,7 +130,9 @@
 #define RAD_TO_DEG          57.29577951f
 
 // --- Variables Globales ---
+#ifndef SENSOR_DIAGNOSTICS
 static size_t uart_port = UART_NUM_0;
+#endif
 static SemaphoreHandle_t g_data_mutex = NULL;
 
 // Cache bumpers
@@ -139,9 +149,21 @@ static int64_t g_t_cen_us = 0;
 static int64_t g_t_der_us = 0;
 
 // Cache IMU
-static float g_roll = 0.0f;
-static float g_pitch = 0.0f;
-static float g_yaw = 0.0f;
+static float g_roll = NAN;
+static float g_pitch = NAN;
+static float g_yaw = NAN;
+static float g_accel[3] = {NAN, NAN, NAN}, g_gyro[3] = {NAN, NAN, NAN};
+static uint32_t g_imu_ok, g_imu_errors, g_cal_samples;
+static int64_t g_t_imu_us;
+static bool g_imu_init_ok;
+static int g_who68 = -1, g_who69 = -1;
+static uint32_t g_gps_bytes, g_gps_lines, g_gps_bad_checksum;
+static char g_last_nmea[256];
+static int64_t g_t_gps_rx_us;
+#ifdef SENSOR_DIAGNOSTICS
+static char g_gps_hex[80];               // hex crudo de los ultimos bytes recibidos
+static uint32_t g_gps_cur_baud = GPS_BAUD_RATE;
+#endif
 
 // Cache GPS
 static float g_gps_lat = NAN;
@@ -152,6 +174,7 @@ static float g_gps_sats = -1.0f;
 static float g_gps_hdop = -1.0f;
 static int64_t g_t_gps_us = 0;
 
+#ifndef SENSOR_DIAGNOSTICS
 // Cache APP (se llenara desde la tarea Bluetooth)
 static float g_app_connected = 0.0f;
 static float g_app_state = 0.0f;
@@ -163,6 +186,8 @@ static float g_app_seq = 0.0f;
 static float g_app_polygon_id = 0.0f;
 static int64_t g_t_app_cmd_us = 0;      // 0 = nunca llego comando
 
+#endif
+
 // Offsets IMU
 static float gx_off = 0, gy_off = 0, gz_off = 0;
 
@@ -173,10 +198,13 @@ static void calibrar_mpu(void);
 static void init_gps_uart(void);
 
 static float medirDistancia(gpio_num_t pinTrig, gpio_num_t pinEcho);
+#ifndef SENSOR_DIAGNOSTICS
 static float ultra_para_publicar(float valor, int64_t t_us, int64_t ahora_us);
 static float gps_para_publicar(float valor, int64_t t_us, int64_t ahora_us);
 static float gps_fix_para_publicar(float fix, int64_t t_us, int64_t ahora_us);
 static float app_age_ms(int64_t t_us, int64_t ahora_us);
+
+#endif
 
 static double nmea_to_decimal(const char *coord, char hemisphere);
 static bool parse_gga_line(
@@ -191,7 +219,11 @@ static bool parse_gga_line(
 
 void ultrasonic_task(void *arg);
 void imu_task(void *arg);
+#ifndef SENSOR_DIAGNOSTICS
 void micro_ros_task(void *arg);
+#else
+static void diagnostic_task(void *arg);
+#endif
 void bumper_task(void *arg);
 void gps_task(void *arg);
 
@@ -202,7 +234,7 @@ void app_main(void)
 {
     esp_log_level_set("*", ESP_LOG_NONE);
 
-#if defined(RMW_UXRCE_TRANSPORT_CUSTOM)
+#if !defined(SENSOR_DIAGNOSTICS) && defined(RMW_UXRCE_TRANSPORT_CUSTOM)
     rmw_uros_set_custom_transport(
         true,
         (void *)&uart_port,
@@ -220,6 +252,12 @@ void app_main(void)
     }
 
     init_gpio_sensores();
+#ifdef SENSOR_DIAGNOSTICS
+    // Validacion actual: bumpers con derecho en GPIO39.
+    xTaskCreatePinnedToCore(bumper_task, "bumper_task", 4096, NULL, 7, NULL, 1);
+    xTaskCreatePinnedToCore(diagnostic_task, "diagnostic", 6144, NULL, 4, NULL, 1);
+    return;
+#endif
     init_i2c_mpu();
     calibrar_mpu();
     init_gps_uart();
@@ -231,7 +269,11 @@ void app_main(void)
     // Core 1 -> tareas rápidas
     xTaskCreatePinnedToCore(bumper_task,     "bumper_task", 4096,  NULL, 7, NULL, 1);
     xTaskCreatePinnedToCore(imu_task,        "imu_task",    8192,  NULL, 6, NULL, 1);
+#ifdef SENSOR_DIAGNOSTICS
+    xTaskCreatePinnedToCore(diagnostic_task, "diagnostic", 6144, NULL, 4, NULL, 1);
+#else
     xTaskCreatePinnedToCore(micro_ros_task,  "uros_task",  16384,  NULL, 4, NULL, 1);
+#endif
 }
 
 // -------------------------------------------------
@@ -272,6 +314,7 @@ static float medirDistancia(gpio_num_t pinTrig, gpio_num_t pinEcho)
     return distancia;
 }
 
+#ifndef SENSOR_DIAGNOSTICS
 static float ultra_para_publicar(float valor, int64_t t_us, int64_t ahora_us)
 {
     if (t_us == 0) return -1.0f;
@@ -299,6 +342,8 @@ static float app_age_ms(int64_t t_us, int64_t ahora_us)
     return (float)(ahora_us - t_us) / 1000.0f;
 }
 
+#endif
+
 // -------------------------------------------------
 // GPS helpers
 // -------------------------------------------------
@@ -308,9 +353,14 @@ static double nmea_to_decimal(const char *coord, char hemisphere)
         return NAN;
     }
 
-    double raw = atof(coord);
+    char *end;
+    double raw = strtod(coord, &end);
+    if (*end || !isfinite(raw) || raw < 0 || raw > 18000) return NAN;
     int degrees = (int)(raw / 100.0);
     double minutes = raw - (degrees * 100.0);
+    int limit = (hemisphere == 'N' || hemisphere == 'S') ? 90 : 180;
+    if (hemisphere != 'N' && hemisphere != 'S' && hemisphere != 'E' && hemisphere != 'W') return NAN;
+    if (minutes >= 60 || degrees > limit || (degrees == limit && minutes != 0)) return NAN;
     double decimal = degrees + (minutes / 60.0);
 
     if (hemisphere == 'S' || hemisphere == 'W') {
@@ -330,13 +380,16 @@ static bool parse_gga_line(
     double *hdop
 )
 {
+    if (!sensor_nmea_checksum_ok(line)) return false;
     if (strncmp(line, "$GPGGA", 6) != 0 && strncmp(line, "$GNGGA", 6) != 0) {
         return false;
     }
 
     char buffer[256];
+    if (strlen(line) >= sizeof(buffer)) return false;
     strncpy(buffer, line, sizeof(buffer) - 1);
     buffer[sizeof(buffer) - 1] = '\0';
+    *strchr(buffer, '*') = '\0'; // checksum ya verificado
 
     char *token = buffer;
     int field_index = 0;
@@ -352,7 +405,7 @@ static bool parse_gga_line(
 
     // Separacion manual: strtok_r saltea campos vacios (",,") y corre los indices
     while (token != NULL) {
-        char *sep = strpbrk(token, ",*");
+        char *sep = strchr(token, ',');
         if (sep != NULL) *sep = '\0';
 
         switch (field_index) {
@@ -388,13 +441,18 @@ static bool parse_gga_line(
         field_index++;
     }
 
-    *fix_quality = atoi(fix_str);
+    if (field_index < 15 || !fix_str[0]) return false;
+    char *fix_end;
+    long fix = strtol(fix_str, &fix_end, 10);
+    if (*fix_end || fix < 0 || fix > 8) return false;
+    *fix_quality = (int)fix;
     *satellites = (sats_str[0] != '\0') ? atoi(sats_str) : -1;
     *hdop = (hdop_str[0] != '\0') ? atof(hdop_str) : -1.0;
 
     if (*fix_quality > 0) {
         *latitude = nmea_to_decimal(lat_str, ns);
         *longitude = nmea_to_decimal(lon_str, ew);
+        if (!isfinite(*latitude) || !isfinite(*longitude)) return false;
         *altitude = (alt_str[0] != '\0') ? atof(alt_str) : NAN;
     } else {
         *latitude = NAN;
@@ -442,33 +500,34 @@ static void init_gpio_sensores(void)
 // -------------------------------------------------
 static void init_i2c_mpu(void)
 {
-    i2c_config_t i2c_c = {
-        .mode = I2C_MODE_MASTER,
-        .sda_io_num = I2C_MASTER_SDA_IO,
-        .scl_io_num = I2C_MASTER_SCL_IO,
-        .sda_pullup_en = GPIO_PULLUP_ENABLE,
-        .scl_pullup_en = GPIO_PULLUP_ENABLE,
-        .master.clk_speed = I2C_MASTER_FREQ_HZ
+    i2c_config_t cfg = {
+        .mode = I2C_MODE_MASTER, .sda_io_num = I2C_MASTER_SDA_IO,
+        .scl_io_num = I2C_MASTER_SCL_IO, .sda_pullup_en = GPIO_PULLUP_ENABLE,
+        .scl_pullup_en = GPIO_PULLUP_ENABLE, .master.clk_speed = I2C_MASTER_FREQ_HZ
     };
-
-    i2c_param_config(I2C_MASTER_NUM, &i2c_c);
-    i2c_driver_install(I2C_MASTER_NUM, I2C_MODE_MASTER, 0, 0, 0);
-
-    i2c_master_write_to_device(
-        I2C_MASTER_NUM,
-        MPU_ADDR,
-        (uint8_t[]){MPU_PWR_MGMT_1, 0x00},
-        2,
-        pdMS_TO_TICKS(100)
-    );
-
-    vTaskDelay(pdMS_TO_TICKS(100));
+    if (i2c_param_config(I2C_MASTER_NUM, &cfg) != ESP_OK ||
+        i2c_driver_install(I2C_MASTER_NUM, cfg.mode, 0, 0, 0) != ESP_OK) return;
+    uint8_t who;
+    if (i2c_master_write_read_device(I2C_MASTER_NUM, 0x68, (uint8_t[]){0x75}, 1,
+                                   &who, 1, pdMS_TO_TICKS(50)) == ESP_OK) g_who68 = who;
+    if (i2c_master_write_read_device(I2C_MASTER_NUM, 0x69, (uint8_t[]){0x75}, 1,
+                                   &who, 1, pdMS_TO_TICKS(50)) == ESP_OK) g_who69 = who;
+    // Escalas que usan ACCEL_SENS / GYRO_SENS: +/-2 g y +/-250 grados/s.
+    const uint8_t config[][2] = {{0x6B, 0x01}, {0x1A, 0x03}, {0x19, 0x09},
+                                  {0x1B, 0x00}, {0x1C, 0x00}};
+    for (size_t i = 0; i < sizeof(config) / sizeof(config[0]); i++) {
+        if (i2c_master_write_to_device(I2C_MASTER_NUM, MPU_ADDR, config[i], 2,
+                                     pdMS_TO_TICKS(100)) != ESP_OK) return;
+        if (i == 0) vTaskDelay(pdMS_TO_TICKS(100));
+    }
+    g_imu_init_ok = true;
 }
 
 static void calibrar_mpu(void)
 {
     float sx = 0, sy = 0, sz = 0;
     uint8_t r[14];
+    if (!g_imu_init_ok) return;
 
     for (int i = 0; i < 300; i++) {
         if (i2c_master_write_read_device(
@@ -481,16 +540,19 @@ static void calibrar_mpu(void)
                 pdMS_TO_TICKS(50)
             ) == ESP_OK) {
 
+            g_cal_samples++;
             sx += (float)((int16_t)(r[8]  << 8 | r[9]))  / GYRO_SENS;
             sy += (float)((int16_t)(r[10] << 8 | r[11])) / GYRO_SENS;
             sz += (float)((int16_t)(r[12] << 8 | r[13])) / GYRO_SENS;
         }
-        vTaskDelay(pdMS_TO_TICKS(1));
+        vTaskDelay(pdMS_TO_TICKS(IMU_PERIOD_MS));
     }
 
-    gx_off = sx / 300.0f;
-    gy_off = sy / 300.0f;
-    gz_off = sz / 300.0f;
+    if (g_cal_samples >= 270) {
+        gx_off = sx / g_cal_samples;
+        gy_off = sy / g_cal_samples;
+        gz_off = sz / g_cal_samples;
+    }
 }
 
 // -------------------------------------------------
@@ -526,7 +588,8 @@ void bumper_task(void *arg)
 {
     while (1) {
         float b_l = (gpio_get_level(PIN_B_L) == 0) ? 1.0f : 0.0f;
-        float b_c = (gpio_get_level(PIN_B_C) == 0) ? 1.0f : 0.0f;
+        // Central con circuito: HIGH al presionar, LOW en reposo (reporte del usuario).
+        float b_c = (gpio_get_level(PIN_B_C) == 1) ? 1.0f : 0.0f;
         float b_r = (gpio_get_level(PIN_B_R) == 0) ? 1.0f : 0.0f;
 
         xSemaphoreTake(g_data_mutex, portMAX_DELAY);
@@ -549,23 +612,26 @@ void ultrasonic_task(void *arg)
         float izq, cen, der;
 
         izq = medirDistancia(TRIG_IZQ, ECHO_IZQ);
+        int64_t t_izq = esp_timer_get_time();
         vTaskDelay(pdMS_TO_TICKS(DESFASE_MS));
 
         cen = medirDistancia(TRIG_CEN, ECHO_CEN);
+        int64_t t_cen = esp_timer_get_time();
         vTaskDelay(pdMS_TO_TICKS(DESFASE_MS));
 
         der = medirDistancia(TRIG_DER, ECHO_DER);
+        int64_t t_der = esp_timer_get_time();
 
         xSemaphoreTake(g_data_mutex, portMAX_DELAY);
 
         g_dist_izq = izq;
-        g_t_izq_us = esp_timer_get_time();
+        g_t_izq_us = t_izq;
 
         g_dist_cen = cen;
-        g_t_cen_us = esp_timer_get_time();
+        g_t_cen_us = t_cen;
 
         g_dist_der = der;
-        g_t_der_us = esp_timer_get_time();
+        g_t_der_us = t_der;
 
         xSemaphoreGive(g_data_mutex);
 
@@ -582,6 +648,7 @@ void gps_task(void *arg)
     uint8_t gps_data[GPS_BUF_SIZE];
     char line[256];
     int line_pos = 0;
+    bool overflow = false;
 
     while (1) {
         int len = uart_read_bytes(
@@ -592,6 +659,17 @@ void gps_task(void *arg)
         );
 
         if (len > 0) {
+            xSemaphoreTake(g_data_mutex, portMAX_DELAY);
+            g_gps_bytes += len;
+            g_t_gps_rx_us = esp_timer_get_time();
+#ifdef SENSOR_DIAGNOSTICS
+            {
+                int hn = len < 24 ? len : 24;
+                char *hp = g_gps_hex;
+                for (int k = 0; k < hn; k++) hp += snprintf(hp, 4, "%02X ", gps_data[k]);
+            }
+#endif
+            xSemaphoreGive(g_data_mutex);
             for (int i = 0; i < len; i++) {
                 char c = (char)gps_data[i];
 
@@ -600,8 +678,14 @@ void gps_task(void *arg)
                 }
 
                 if (c == '\n') {
+                    if (overflow) { overflow = false; line_pos = 0; continue; }
                     if (line_pos > 0) {
                         line[line_pos] = '\0';
+                        xSemaphoreTake(g_data_mutex, portMAX_DELAY);
+                        g_gps_lines++;
+                        snprintf(g_last_nmea, sizeof(g_last_nmea), "%s", line);
+                        if (!sensor_nmea_checksum_ok(line)) g_gps_bad_checksum++;
+                        xSemaphoreGive(g_data_mutex);
 
                         double lat, lon, alt, hdop;
                         int fix_quality, sats;
@@ -623,9 +707,11 @@ void gps_task(void *arg)
                         line_pos = 0;
                     }
                 } else {
+                    if (overflow) continue;
                     if (line_pos < (int)(sizeof(line) - 1)) {
                         line[line_pos++] = c;
                     } else {
+                        overflow = true;
                         line_pos = 0;
                     }
                 }
@@ -680,9 +766,20 @@ void imu_task(void *arg)
             yaw_local  += gz * dt;
 
             xSemaphoreTake(g_data_mutex, portMAX_DELAY);
+            g_imu_ok++;
+            g_t_imu_us = now;
+            g_accel[0] = ax; g_accel[1] = ay; g_accel[2] = az;
+            g_gyro[0] = gx; g_gyro[1] = gy; g_gyro[2] = gz;
             g_roll = roll_local;
             g_pitch = pitch_local;
             g_yaw = yaw_local;
+            xSemaphoreGive(g_data_mutex);
+        } else {
+            xSemaphoreTake(g_data_mutex, portMAX_DELAY);
+            g_imu_errors++;
+            g_roll = g_pitch = g_yaw = NAN;
+            g_accel[0] = g_accel[1] = g_accel[2] = NAN;
+            g_gyro[0] = g_gyro[1] = g_gyro[2] = NAN;
             xSemaphoreGive(g_data_mutex);
         }
 
@@ -694,6 +791,7 @@ void imu_task(void *arg)
 // Task: Micro-ROS Publish
 // Core 1 - rápida
 // -------------------------------------------------
+#ifndef SENSOR_DIAGNOSTICS
 void micro_ros_task(void *arg)
 {
     vTaskDelay(pdMS_TO_TICKS(1000));
@@ -820,3 +918,8 @@ void micro_ros_task(void *arg)
         vTaskDelay(pdMS_TO_TICKS(ROS_PUBLISH_MS));
     }
 }
+#endif
+
+#ifdef SENSOR_DIAGNOSTICS
+#include "sensor_diagnostic.inc"
+#endif

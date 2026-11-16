@@ -144,3 +144,98 @@ Este documento condensa el progreso general del proyecto a alto nivel día a dí
 - **micro-ROS agent compilado desde source** (branch `lyrical` del repo oficial). El agente usa un SuperBuild que descarga `microxrcedds_agent` automáticamente. Se resolvió un conflicto con Python 3.12 de `uv` forzando el Python del sistema (`/usr/bin/python3`). Binario operativo en `~/microros_agent_ws/`.
 - Creados `scripts/pi/{env.sh,run_brain.sh,run_agent_serial.sh}` y copiados a la Pi.
 - `CLAUDE.md` y `docs/00_estado_actual.md` actualizados: PC = Jazzy/firmware, Pi 4 = Lyrical/producción.
+
+### Verificación nocturna del sensor S3 y agente
+
+- PR #7 integrado y PC sincronizada en `main` (`9f29665`).
+- SSH a la Pi operativo. Sensor por USB nativo; EN cambió ttyACM0 a ttyACM1. Se probó el identificador estable por `/dev/serial/by-id/`.
+- Arranque desde flash y compilación del sensor de hoy confirmados mediante captura USB y prefijo SHA ELF del binario local.
+- Sin sesión micro-ROS ni `/sensores` en pruebas directas y con el puente existente; DTR/RTS liberados tampoco resolvieron. Procesos de prueba cerrados.
+- Se identificaron puente y parches del agente presentes solo en la Pi. Falta diagnosticar firmware/transporte desde la PC; no se probó movimiento.
+
+- **Continuación en la PC:** se cargó temporalmente firmware con marcas USB; se verificó el arranque de todas las tareas y llegada a `rclc_support_init`. Marcas retiradas después de la captura.
+- **Corrección validada:** transporte USB directo al FIFO, con timeout de escritura de 1 s y esperas que ceden al scheduler, reemplaza el controlador USB con interrupciones. FreeRTOS a 1000 Hz en `sdkconfig.defaults`. No se modificó el protocolo ni los pines.
+- Agente local sin puente: sesión, participante, topic y publicador creados; `/sensores` recibido con 24 valores. Frecuencia final de unos **18,5 Hz** durante 15 s. Compilación sin warnings y hashes de flasheo verificados. Falta repetir en la Pi y validar sensores físicos.
+
+- **Validación final en Raspberry Pi 4 / Lyrical:** sensor S3 reconectado por USB nativo; agente directo al identificador estable, sin puente. Sesión y publicador creados; `/sensores` de 24 campos recibido y frecuencia de unos 18,5 Hz durante 15 s. Agente dejado con `nohup` y log `/tmp/cortadora-sensor-agent.log`; no se configuró inicio automático al reiniciar. Los parches anteriores del agente siguen instalados; no se probó retirarlos. Lecturas físicas y adaptación del Brain todavía pendientes.
+
+- Al pasar el agente a segundo plano, el sensor no recuperó automáticamente la sesión. Reinicio por RTS del sensor y mensaje de 24 campos confirmado con el agente definitivo (PID 30840). Pendiente implementar reconexión en firmware; por ahora reiniciar el sensor después de reiniciar el agente.
+
+- A pedido del usuario, se preparó diagnóstico de adquisición del sensor sin micro-ROS, en compilación separada y con las mismas tareas. Se agregaron estados/counters IMU y GPS, validación NMEA, calibración por muestras válidas y timestamps por ultrasonido. Compilan diagnóstico y firmware normal; parser GPS probado con fix válido/sin fix, campos vacíos, hemisferios S/W y rechazos por truncamiento, coordenadas inválidas o checksum. Pendiente conectar a PC, cargar y hacer pruebas físicas.
+
+- **Carga y primera captura del diagnóstico (13/11/26):** sensor S3 en la PC por USB nativo; flasheo con hashes verificados. Durante 7 s: bumpers 0/0/0 sin accionamiento, ultras -4/-4/-4 (ECHO alto antes de TRIG), IMU sin respuesta en 0x68 ni 0x69 (0 lecturas exitosas, sin calibración), GPS 1 byte y ninguna línea NMEA. Pendiente confirmar alimentación/cableado y ejecutar pruebas físicas; no se validó ningún sensor todavía.
+
+- **Diagnóstico enfocado en bumpers:** se compiló y cargó una versión que inicia solo las tareas de bumpers y salida USB (sin iniciar IMU/GPS/ultras/micro-ROS). Muestra IZQUIERDO GPIO38, CENTRAL GPIO2 y DERECHO GPIO37; GPIO=0 presionado, GPIO=1 libre; cambios y contadores sin antirrebote. Resumen cada 2 s. Compilación sin warnings y hashes de carga verificados. Pendiente accionar y verificar cada contacto individualmente.
+
+- **Prueba de polaridad central:** según el usuario, incluye un circuito y aparece presionado sin accionarlo. Se cambia solamente el central (GPIO2) a activo HIGH, manteniendo pull-up e izquierdos/derechos activos LOW. Diagnóstico actualizado para mostrar el nivel correspondiente. Es una hipótesis pendiente de presionar/soltar físicamente; módulo y alimentación todavía sin identificar.
+
+- **Resultado de prueba central activo HIGH:** el usuario reporta que al presionar marca LIBRE. Se rechaza la inversión y se restaura el código y diagnóstico a activo LOW para los tres bumpers. Compilado; flasheo pendiente de liberar el monitor serial. Falta confirmar ciclo completo en reposo/presionado/soltado.
+
+- Monitor cerrado por el usuario; diagnóstico con los tres bumpers activos LOW cargado correctamente, hashes verificados. Pendiente confirmar central en reposo/presionado/soltado.
+
+- Nueva observación explícita del usuario con firmware activo LOW: central en reposo marca PRESIONADO y al accionarlo marca LIBRE. Se configura nuevamente solo el central como activo HIGH y se carga con hashes verificados; cabecera serial actualizada. La interpretación anterior como activo LOW queda descartada para este circuito según este reporte. Pendiente ciclo de confirmación con esta carga.
+
+- El usuario confirma central correcto con activo HIGH y derecho correcto con activo LOW; junto con izquierdo, los tres bumpers quedan validados por accionamiento. Se prepara diagnóstico exclusivo del ultrasonido izquierdo TRIG18/ECHO16, medición cada 250 ms, distancia o error con niveles ECHO. Pendiente liberar monitor serial y cargar.
+
+- Ultrasonido izquierdo: diagnóstico exclusivo cargado con hashes verificados al liberar el monitor. Captura inicial de 3 s con lecturas 46,9–69,6 cm y sin códigos de error. Pendiente referencia física a 20/50/100 cm; estas lecturas solo confirman recepción de pulsos, no precisión.
+
+- El usuario acepta la prueba del ultrasonido izquierdo y solicita seguir. Se carga diagnóstico exclusivo del central TRIG8/ECHO9, hashes verificados. Captura de 3 s con 56,9 cm inicial y luego aproximadamente 75 cm sin errores; pendiente verificar referencia física. El usuario no proporcionó valores de referencia del izquierdo.
+
+- Usuario acepta ultrasonido central y solicita derecho para cerrar la prueba. Diagnóstico derecho TRIG17/ECHO15 cargado, hashes verificados. Captura inicial: 11 lecturas de 63,9 cm en 3 s sin errores. Pendiente prueba del usuario; no se recibió referencia de distancia medida.
+
+- **IMU aislado:** usuario confirma los tres ultrasónicos. Diagnóstico solo IMU en GPIO6/7: primera captura detectó WHO=112 en 0x68 y nada en 0x69, por lo que se corrige la dirección del firmware a 0x68. Nueva carga con hashes verificados y captura de 15 s: init OK, 300/300 muestras de calibración, 930 lecturas correctas y 0 errores al final. Bias (4,7323; -4,1215; -0,5998) dps; giro corregido cerca de cero, roll≈4,18° / pitch≈-3,06° y yaw estable. Aceleración total alrededor de 0,93 g; pendiente verificar escala/offset y prueba física de inclinación y giro. Captura en /tmp/cortadora-imu-verified.txt (temporal).
+
+- El usuario confirma respuesta física correcta del IMU. Se carga diagnóstico exclusivo GPS RX35/TX36, 9600 baud, hashes verificados. Captura de 10 s: 1 byte inicial, 0 líneas NMEA y ningún GGA; no hay recepción UART continua. GPS pendiente de validación y revisión física de alimentación/cableado.
+
+- Usuario confirma módulo N16R8. GPIO35/36/37 reservados a memoria interna según documentación Espressif. Se cambia fuente y diagnóstico GPS a RX4/TX5; pendiente recablear y cargar. Bumper derecho GPIO37 también requiere reasignación; no se modifica todavía su pin.
+
+- Usuario confirma recableado GPS RX4/TX5. Diagnóstico cargado con hashes verificados; captura de 10 s sigue con solo 1 byte inicial y 0 líneas NMEA. El cambio elimina el uso de pines reservados, pero no resuelve por sí solo la falta de recepción GPS. Pendiente identificar alimentación/modelo y señal TX antes de dar el GPS por validado.
+
+## 14/11/26 — Continuación GPS aislado
+
+- Usuario informa inscripción `FSTR2 C01020-09` y alimentación desde 3V3; no se identificó ficha técnica verificable para esa referencia exacta. No se presume que 3,3 V sea su alimentación nominal.
+- GPS aislado conectado al ESP32 por RX4/TX5 y USB nativo a la PC. Captura inicial mantiene solo un byte 00 y ninguna línea NMEA. El diagnóstico existente ya incluye barrido 9600/4800/38400/57600/115200/19200; se captura un ciclo completo sin modificar ese código ni enviar comandos al GPS.
+
+- 14/11/26: captura completa de 33 s del barrido existente 9600/4800/38400/57600/115200/19200. Solo 00 inicial a 9600; después 0 bytes y 0 líneas en todas las ventanas de 5 s. No se cambió alimentación ni se enviaron comandos. Esto no identifica una avería: falta comprobar tensión real en el módulo y señal TX/entrada RX, o hacer loopback UART.
+
+- **Loopback físico 14/11/26:** usuario mide 3,1 V en alimentación GPS y conecta jumper GPIO5–GPIO4 con TX/RX GPS desconectados. Se carga diagnóstico UART2 sin tarea GPS. Resultado en 8 s: 8 mensajes únicos, 43 bytes cada uno, TX/RX idénticos y 0 fallos a 9600 baud. Verifica UART/pines del ESP, no estado ni alimentación nominal del GPS. Captura temporal /tmp/cortadora-loopback-result.txt. Firmware activo es loopback; restaurar recepción pasiva antes de reconectar RX GPS.
+
+- **GPS recupera comunicación tras alimentar VDD_B:** referencia del usuario https://cdn.sparkfun.com/datasheets/Sensors/GPS/UP501.pdf, sección 4.2. Usuario indica sin batería visible y mide ≈3,18 V en VDD y VDD_B contra GND. Con TX GPS→GPIO4, RX GPS desconectado y sin jumper, se carga recepción pasiva fija 9600 baud. Captura de 12 s: último resumen 1523 bytes y 43 líneas, GGA válidos con fix=0/sats=0, checksum_mal=1 inicial sin nuevos incrementos. Comunicación UART validada; posición geográfica todavía pendiente de prueba con cielo visible. Captura temporal /tmp/cortadora-gps-vddb-capture.txt.
+
+- 14/11/26, verificación antes de protoboard: RX GPS conectado por usuario a GPIO5, TX GPS a GPIO4, VDD y VDD_B alimentados. Captura pasiva de 12 s: 2864 bytes, 64 líneas, GGA frescos; 1 checksum inicial que no aumenta, sin pérdida de tráfico. No se enviaron consultas, por lo que no se valida respuesta del GPS por RX. Posición pendiente (fix=0/sats=0). Captura /tmp/cortadora-gps-rx-connected.txt (temporal).
+
+- 14/11/26: tras pasar GPS al protoboard de sensores, captura de 12 s con el mismo firmware pasivo arroja únicamente 00 inicial (1 byte, 0 líneas NMEA), frente a recepción correcta previa. Pendiente verificar alimentación principal/backup, masa común y continuidad de TX hacia GPIO4 en el montaje nuevo. Captura /tmp/cortadora-gps-protoboard.txt (temporal).
+
+- 14/11/26: usuario detecta que omitió conectar VDD_B al trasladar GPS al protoboard. Tras conectarlo, sin cambios de firmware, captura de 10 s recibe 1297 bytes y 36 líneas; GGA frescos con fix=0/sats=0, checksum_mal=1 inicial sin nuevos errores. Recepción UART del GPS en protoboard validada; posición al aire libre pendiente. Captura temporal /tmp/cortadora-gps-protoboard-vddb.txt.
+
+- 14/11/26: usuario traslada bumper derecho de GPIO37 a GPIO39. Se actualiza PIN_B_R y se carga diagnóstico solo bumpers con hashes verificados; se conserva central activo HIGH y laterales activos LOW. Captura inicial derecho GPIO39=1 LIBRE; pendiente prueba física de presionar/soltar. GPIO39 deja de estar reservado para un cuarto bumper.
+
+- **14/11/26 integración micro-ROS en PC:** se compila y carga firmware normal con SENSOR_DIAGNOSTICS=OFF, GPIO39 derecho, central activo HIGH, IMU0x68, GPS RX4/TX5; hashes verificados. Agente local establece sesión y crea `/sensores`. Captura de 18 s: 334 mensajes, 18,5096 Hz, intervalos 52,74–55,00 ms, 24 campos; sin errores de formato/bumpers/IMU/coherencia fix. Últimos ultras -1/-1/-1 (pendiente revisar alimentación/recepción de eco), IMU R/P/Y≈3,24/-1,50/-0,11°, GPS fix=0/sats=0, APP por defecto. No se ejecutó Brain ni comandos de motor. Agente queda activo en la sesión de prueba; pendiente Raspberry. Resultado temporal /tmp/cortadora-telemetry-result.json.
+
+- Usuario confirma línea 5 V de ultrasonidos apagada y la enciende. Nueva captura de 18 s con todos los sensores: 333 mensajes / 18,5188 Hz, intervalos 53,36–54,59 ms; 0 errores de longitud/bumpers/IMU/coherencia GPS. Últimas distancias I/C/D 45,65/67,95/65,67 cm; IMU finito, GPS fix=0/sats=0, APP por defecto. Todos los grupos presentes en `/sensores`; pendiente posición GPS, acelerómetro y réplica en Raspberry. Resultado /tmp/cortadora-telemetry-powered-result.json.
+
+- **14/11/26 réplica micro-ROS en Raspberry:** SSH operativo, mismo sensor detectado como ttyACM0. Agente iniciado con nohup (PID10321, log /tmp/cortadora-sensor-agent.log); sesión y publicador creados. Captura 18 s: 334 mensajes de 24 campos, 18,5167 Hz, intervalos52,29–56,59 ms, 0 errores de longitud/bumpers/IMU/coherencia GPS. Últimos ultrasonidos -1/-1/-1; se consulta alimentación5V y masa común. GPS comunica sinfix; Brain no iniciado. Agente queda activo sin inicio automático al reiniciar.
+
+- 14/11/26, Raspberry: usuario enciende línea de 5 V que había apagado. Captura final de 18 s: 334 mensajes, 18,5204 Hz, intervalos 53,12–54,91 ms, 24 campos y 0 errores de las comprobaciones. Distancias I/C/D 54,74/68,58/57,71 cm; IMU finito y bumpers 0/0/0, GPS fix=0/sats=0. Telemetría conjunta validada en Pi; quedan posición GPS al aire libre/calibración de acelerómetro, no se ejecuta Brain. Agente sigue activo.
+
+- **14/11/26, inicio ESP32 motores:** usuario reporta arranque izquierdo al alimentar driver con ESP por USB. Desconecta potencia. CP2102 ttyUSB0, ESP32-D0WDQ6 rev1.1; lectura de cabecera flash con ROM (primera lectura con stub falló digest, repetida sin stub OK) identifica compilación20/04/2026 22:24:30. Se prepara y carga diagnóstico separado MOTOR_DIAGNOSTICS, sin micro-ROS ni PWM; salidas32/33/25/26/18 LOW desde app_main. IMU en SDA27/SCL14 detectado0x68/WHO0x75,19 lecturas/0errores en5s, módulo acel≈0,976g, giro crudo≈9/1,6/0dps. Sin calibración; prueba de movimiento y causa del arranque pendientes. No se energizó potencia ni se enviaron comandos de movimiento. Build sin warnings, flasheo hashes verificados.
+
+- **14/11/26 pulso manual izquierdo:** usuario confirma que con diagnóstico previo y driver energizado no gira; luego apaga potencia y levanta ruedas. Se compila/carga MOTOR_PULSE_TEST por scripts separados, sin warnings y con hashes verificados. Arranque PWM0, derecha/cortadora LOW; `i`+Enter da PWM40/255 en GPIO32 con GPIO33LOW, corte por esp_timer300ms y parada `s`. Captura serial inicial PARADO/PWM0; asistente no envió comandos de movimiento. Pendiente que usuario energice tras comprobar PARADO y ejecute un pulso.
+
+- Usuario solicita aumentar solo prueba izquierda a PWM100/255 y duración1s. Cambio compilado sin warnings; corte automático/stop `s` permanecen. NO se cargó: usuario responde «Todavía no» a potencia apagada/ruedas levantadas. Antes no se confirmó línea PULSO en terminal; falta verificar recepción serial antes de atribuir ausencia de movimiento a potencia.
+
+- Usuario confirma potencia desconectada y ruedas levantadas. Se carga prueba izquierda PWM100/255 durante1s; hashes verificados y arranque PARADO/PWM0 confirmado por lectura serial. No se envió movimiento; pendiente prueba manual y observación física.
+
+- Se solicita prueba simultánea. Usuario confirma potencia apagada y ruedas levantadas. Se compila sin warnings extensión `b`+Enter para ambos motores (PWM100/255,1s; GPIO32/26 PWM y GPIO33/25 LOW), corte de ambos por temporizador y `s`; `i` conserva izquierda. Carga pendiente de cerrar monitor serial; no se ejecutó movimiento desde el asistente.
+
+- Monitor cerrado por usuario; prueba simultánea cargada con hashes verificados. Arranque PWM0 en ambos canales confirmado, sin órdenes de movimiento. Pendiente `b`+Enter por usuario y observación de ambas ruedas/parada.
+
+- **Fallo de programación confirmado y corregido:** con potencia apagada/ruedas levantadas/monitor cerrado por usuario, se envía `s` y `b`. `b` era recibido, pero la prueba abortaba por «Fade service not installed» en ledc_set_duty_and_update. Se agrega ledc_fade_func_install, respaldo ledc_stop si falla parada y lectura de duty tras3ms para esperar latch del siguiente periodo. Carga con hashes verificados. Test hardware sin potencia: dos PWM100/100 aplicados, parada0/0 a1005ms automática y203ms por `s`, sin abort/reinicio. Captura /tmp/cortadora-pwm-fixed-test.txt y verificador /tmp/cortadora-test-pwm.py. Movimiento físico pendiente; no atribuir falta de movimiento previa a driver/PWM bajo.
+
+- **15/11/26:** usuario confirma movimiento izquierdo adelante y derecho atrás. Se corrige avance derecho a GPIO25 PWM/GPIO26 LOW en prueba y firmware normal; marcha atrás queda GPIO26 PWM/GPIO25 LOW. Con potencia apagada y ruedas levantadas confirmadas, se compila/carga diagnóstico con hashes verificados. Pulso se mantiene100/255 durante1s; parada automática y `s` conservadas. Pendiente confirmar movimiento físico ambos adelante.
+
+- **15/11/26 validación física:** usuario confirma «ambos están hacia adelante» tras corregir la derecha a GPIO25 PWM/GPIO26 LOW. Avance de ambas ruedas validado en prueba manual PWM100/255,1s; retroceso y giros aún pendientes. Corrección replicada en fuente normal, pero firmware cargado permanece prueba manual.
+
+- **15/11/26 retroceso:** main ya implementa modos adelante/atrás; diagnóstico manual agrega `r`+Enter, usando GPIO33/26 para retroceso (32/25LOW), y conserva `b` avance. Todos LOW3ms antes de aplicar dirección. PWM100/255,1s, corte cuatro canales y `s`. Compilación sin warnings, carga hashes verificados. Con potencia apagada confirmada, test por serial verifica retroceso, avance y stop anticipado: PWM100/100 y parada0/0 a1005/1005/200ms, sin abort/reinicio. Prueba física de retroceso pendiente. Captura temporal /tmp/cortadora-reverse-results.txt.
+
+- **15/11/26 prueba completa de sentidos:** se agregan `l` giro izq y `d` giro der; permanecen `b` adelante/`r` atrás/`i` izquierda/`s`stop. PWM100,1s. Con potencia apagada y ruedas levantadas confirmadas se carga y prueba por serial: cinco patronesGPIO32/25/33/26 exactos; todos cortan0/0 en1005ms; `s`en200ms; sin abort/reinicio. Movimiento físico de giros/retroceso pendiente. Son pulsos de sentido, no giros con ángulo ni PIVOT/accesorios. Captura temporal /tmp/cortadora-turns-results.txt.

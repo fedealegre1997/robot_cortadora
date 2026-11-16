@@ -21,6 +21,7 @@ setup(
     entry_points={
         'console_scripts': [
             'bumper_decision_node = cortadora_brain.bumper_decision_node:main',
+            'brain_node = cortadora_brain.bumper_decision_node:main',
         ],
     },
 )

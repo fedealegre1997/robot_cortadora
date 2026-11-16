@@ -6,7 +6,9 @@
 
 ---
 
-## 1. ESP32-S3-WROOM-1 N8R2 → ESP32_sensores
+## 1. ESP32-S3-WROOM-1 N16R8 → ESP32_sensores (confirmado 13/11/26)
+
+Actualización: GPS RX4/TX5 ya recableado y diagnóstico cargado. GPIO35/36/37 están reservados internamente en este módulo. Bumper derecho trasladado a GPIO39 con firmware cargado; pendiente verificar accionamiento en el nuevo pin. Las referencias históricas posteriores al N8R2 o GPS35/36 no describen la placa actual.
 
 Los pines de los ultrasónicos, los bumpers y el GPS (35/36) los eligió el usuario. El ECHO del centro (9), el 4.º bumper (39), el I2C y las reservas se propusieron y el usuario los aceptó.
 
@@ -20,21 +22,21 @@ Los pines de los ultrasónicos, los bumpers y el GPS (35/36) los eligió el usua
 | 9 | ECHO ultrasónico centro | HC-SR04 centro — ECHO **por el divisor a 3,3 V** | 27 |
 | 38 | Bumper izquierdo | Final de carrera izq. | 18 |
 | 2 | Bumper centro (adelante) | Final de carrera centro | 22 |
-| 37 | Bumper derecho | Final de carrera der. | 19 |
-| 39 | 4.º bumper (reservado) | 4.º final de carrera, cuando se agregue | — |
-| 35 | UART2 RX (entra al ESP) | **TX** del GPS FSTR2 | 16 |
-| 36 | UART2 TX (sale del ESP) | **RX** del GPS FSTR2 | 17 |
+| 39 | Bumper derecho (activo LOW) | Final de carrera derecho, movido y firmware cargado 14/11/26 | 19 |
+| — | 4.º bumper (sin pin asignado) | GPIO39 ahora utilizado por el derecho | — |
+| 4 | UART2 RX (entra al ESP) | **TX** del GPS FSTR2 | 16 |
+| 5 | UART2 TX (sale del ESP) | **RX** del GPS FSTR2 | 17 |
 | 6 | I2C SDA | MPU-6500 SDA | 21 |
 | 7 | I2C SCL | MPU-6500 SCL | 23 |
 | 1, 10 | Reservados (ADC1) | Futuro monitoreo de tensión de cada batería (con divisor) | — |
 | 43 / 44 | UART0 → micro-ROS | Interno: chip CH343 → conector **COM** → Raspberry. **No cablear** | 1 / 3 |
 
 **Alimentación y masas:**
-- **3V3 del ESP:** VCC del MPU-6500. Su **AD0 va a 3V3**, porque el firmware usa la dirección `0x69`.
+- **3V3 del ESP:** VCC del MPU-6500. **Actualización 13/11/26:** la prueba física detectó el IMU en `0x68` (WHO_AM_I `0x70`) y no en `0x69`; el firmware usa ahora `0x68`. AD0 bajo corresponde a esta dirección. La indicación anterior de AD0 a 3V3 / dirección 0x69 no coincide con la placa probada; no se verificó físicamente el cable de AD0.
 - **5 V del LM2596:** VCC de los 3 HC-SR04 (no del ESP).
 - **GND del ESP:** GND del MPU-6500, del GPS, de los HC-SR04 y un borne de cada final de carrera. Masa común con las baterías.
 - **Finales de carrera:** el firmware usa pull-up interno y toma LOW como presionado → contacto **normalmente abierto** entre el GPIO y GND.
-- **GPS:** se alimenta igual que hoy.
+- **GPS (prueba 14/11/26):** VDD y VDD_B conectados a la fuente de 3,3 V, ≈3,18 V medidos respecto de GND en ambos. VDD_B había quedado libre; tras alimentarlo se recibió NMEA por TX GPS→GPIO4 a 9600 baud. RX GPS permanece desconectado en recepción pasiva. UP501.pdf §4.2 exige VDD_B junto a VDD salvo variante con batería interna; no extender este cableado a una variante distinta sin verificarla.
 
 **No usar:**
 - **0, 3, 45, 46:** strapping.
@@ -51,6 +53,8 @@ Los pines de los ultrasónicos, los bumpers y el GPS (35/36) los eligió el usua
 
 ## 2. ESP32 clásico → ESP32_motores
 
+Actualización14/11/26: I2C elegido por usuario SDA27/SCL14, aplicado en fuente normal y diagnóstico. IMU detectado0x68/WHO0x75. GPIO14 compartido con JTAG; no usar JTAG simultáneamente. Potencia del driver apagada por arranque inesperado de tracción izquierda, causa pendiente.
+
 Propuesto el 02/11/26; el usuario no pidió cambios.
 
 | GPIO | Función | Se conecta a | Antes (S3) |
@@ -61,8 +65,8 @@ Propuesto el 02/11/26; el usuario no pidió cambios.
 | 26 | PWM M2 IN2 (rueda derecha) | MC33926 **M2IN2** | 7 |
 | 17 | UART2 TX → bordeadora | Sabertooth **S1** | 17 |
 | 18 | Habilitación de la cortadora | CBE-12A1C **P1-9** (INHIBIT̄) | 18 |
-| 21 | I2C SDA | IMU placa 3 (MPU, 0x68) SDA. Respaldo: LSM9DS1 | nuevo |
-| 22 | I2C SCL | IMU placa 3 (MPU, 0x68) SCL. Respaldo: LSM9DS1 | nuevo |
+| 27 | I2C SDA | IMU placa 3 (MPU, 0x68) SDA. Respaldo: LSM9DS1 | nuevo |
+| 14 | I2C SCL | IMU placa 3 (MPU, 0x68) SCL. Respaldo: LSM9DS1 | nuevo |
 | 34, 35 | Reservados (ADC1, solo entrada) | Opcional: MC33926 M1FB / M2FB (corriente, para detectar una rueda trabada) | — |
 | 1 / 3 | UART0 → micro-ROS | Interno: puente USB → Raspberry. **No cablear** | 43 / 44 |
 | — | Encoders | **Se eliminan** (motores sin encoder) | 8, 9, 10, 11 |

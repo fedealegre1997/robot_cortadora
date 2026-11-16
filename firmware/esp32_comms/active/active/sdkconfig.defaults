@@ -1,0 +1,25 @@
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=3000
+CONFIG_ESP_TASK_WDT=n
+CONFIG_MICRO_ROS_ESP_XRCE_DDS_MIDDLEWARE=y
+CONFIG_MICRO_ROS_ESP_UART_TRANSPORT=y
+# S3: micro-ROS por USB-Serial-JTAG nativo. La consola no debe usar el USB-JTAG
+# para no mezclarse con los datos de micro-ROS. Consola primaria queda en UART0
+# (GPIO 43/44, sin cablear en esta placa -> inofensiva).
+# micro-ROS usa el USB-JTAG nativo; la consola va a UART0 (sin cablear, inofensiva).
+CONFIG_ESP_CONSOLE_UART_DEFAULT=y
+CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
+
+# Resolucion de 1 ms para las esperas del transporte USB.
+CONFIG_FREERTOS_HZ=1000
+
+# Flash de 16 MB (placa N16R8).
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="16MB"
+
+# Tabla de particiones propia: app de 3 MB (NimBLE + micro-ROS entran holgados).
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
+# BLE por NimBLE (solo BLE, sin Classic). Etapa B del enlace con la app.
+CONFIG_BT_ENABLED=y
+CONFIG_BT_NIMBLE_ENABLED=y
